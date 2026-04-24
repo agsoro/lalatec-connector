@@ -24,5 +24,16 @@ namespace Connector
                 $"Unknown deviceType '{deviceType}'. " +
                 $"Known types: {string.Join(", ", Readers.Keys)}");
         }
+
+        /// <summary>
+        /// Returns the <see cref="IDeviceWriter"/> for the given device type,
+        /// or <c>null</c> if the driver does not support write-back.
+        /// </summary>
+        public static IDeviceWriter? GetWriter(string deviceType)
+        {
+            if (Readers.TryGetValue(deviceType, out var reader) && reader is IDeviceWriter w)
+                return w;
+            return null;
+        }
     }
 }

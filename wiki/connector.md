@@ -431,3 +431,153 @@ dotnet publish -c Release -o ./publish
 
 `connector.json` must be present next to the executable
 (copied automatically by the build via `CopyToOutputDirectory: PreserveNewest`).
+
+---
+
+## 12. Write-back: ThingsBoard → field device
+
+The connector is bidirectional. In addition to polling devices and pushing values **up** to ThingsBoard, it can receive commands from ThingsBoard and push values **down** to the field device.
+
+### 12.1 Architecture
+
+```
+ThingsBoard (UI / Rule Chain)
+      │
+      │  MQTT – existing per-device connection
+      │
+      ├─ v1/devices/me/attributes        (shared attribute update)
+      └─ v1/devices/me/rpc/request/+    (server-side RPC call)
+              │
+       Connector (HandleWriteBackAsync)
+              │
+       IDeviceWriter.Write(key, value)
+              │
+       ├─ GlueckReader  →  ModbusHelper.WriteRegister  →  Modbus TCP
+       └─ BacnetReader  →  BacnetClient.WritePropertyRequest  →  BACnet/IP
+```
+
+Write-back is **opt-in per device** via the `writeback` config block. Devices without `writeback` are unaffected.
+
+### 12.2 Trigger mechanisms
+
+| Mechanism | MQTT topic (subscribe) | TB action |
+|---|---|---|
+| **Shared Attribute** | `v1/devices/me/attributes` | Operator edits a *Shared Attribute* in the TB device page |
+| **Server-side RPC** | `v1/devices/me/rpc/request/+` | Rule Chain or dashboard widget calls `sendRpc` |
+
+Both use the same existing MQTT connection (one per device). The connector adds subscriptions on startup for devices with `writeback` enabled.
+
+### 12.3 Config: `writeback` block
+
+```jsonc
+"writeback": {
+  "sharedAttributes": true,   // react to shared-attribute updates
+  "rpc":              true    // react to server-side RPC calls
+}
+```
+
+Both flags are `false` by default — omitting `writeback` entirely is equivalent to `false/false`.
+
+### 12.4 Modbus write-back (`writableRegisters`)
+
+The driver reads the register map from config. Add a `writableRegisters` array to any Modbus device:
+
+```jsonc
+"writableRegisters": [
+  { "key": "active_allowed_power_pct", "address": "0x1230", "type": "float32-be" },
+  { "key": "setpoint_deg_c",           "address": "1024",   "type": "int16"      }
+]
+```
+
+| Field | Description |
+|---|---|
+| `key` | ThingsBoard attribute/telemetry key (case-insensitive match) |
+| `address` | 0-based register address — decimal (`"4656"`) or hex (`"0x1230"`) |
+| `type` | Data type — see table below |
+
+**Supported `type` values:**
+
+| `type` | Modbus function | Register count | Notes |
+|---|---|---|---|
+| `float32-be` | `WriteMultipleRegisters` | 2 | IEEE 754, big-endian word order (default) |
+| `int32-be` | `WriteMultipleRegisters` | 2 | Signed 32-bit, big-endian |
+| `uint32-be` | `WriteMultipleRegisters` | 2 | Unsigned 32-bit, big-endian |
+| `int16` | `WriteSingleRegister` | 1 | Signed 16-bit |
+| `uint16` | `WriteSingleRegister` | 1 | Unsigned 16-bit |
+| `coil` | `WriteSingleCoil` | — | value ≠ 0 → true |
+
+> **Note:** `JanitzaReader` is read-only and does **not** implement write-back.
+
+### 12.5 BACnet write-back
+
+#### Key format
+
+BACnet write-back targets the same key format that the connector publishes as telemetry:
+
+```
+{typeAlias}_{instance}_{sanitisedName}_{propSuffix}
+```
+
+The writer extracts only the first two tokens (`typeAlias` + `instance`) to identify the target object. The rest of the key is ignored.
+
+| Example key | Resolves to |
+|---|---|
+| `ao_3_supply_sp_value` | `OBJECT_ANALOG_OUTPUT:3` |
+| `av_7_setpoint_value` | `OBJECT_ANALOG_VALUE:7` |
+| `bv_12_fan_enable_value` | `OBJECT_BINARY_VALUE:12` |
+
+Only short type aliases (ao, av, bo, bv, mo, mv) are accepted for writes.
+
+#### Commandability detection
+
+During object discovery, the connector probes `PROP_PRIORITY_ARRAY` for every output/value type object. If the device responds, the object is flagged `Commandable = true` and stored in the discovery cache.
+
+| Object types probed | Commandable? |
+|---|---|
+| AO, AV, BO, BV, MO, MV | Yes (if `PROP_PRIORITY_ARRAY` present) |
+| AI, BI, MI | Never probed — always read-only |
+
+This matches the Siemens Desigo PXC/CC convention: operator-settable setpoints are AV/AO objects with priority arrays; sensor readings are AI objects without.
+
+A write to a non-commandable object is rejected with a clear error message. The field device is never contacted.
+
+#### Priority
+
+`WritePropertyRequest` is called **without a priority** (`priority = null`). The device uses its own default (no priority array slot reserved). This avoids permanently seizing a high-priority slot that could override the automation program.
+
+### 12.6 RPC payload convention
+
+```json
+{
+  "method": "setValue",
+  "params": {
+    "key":   "ao_3_supply_sp_value",
+    "value": 21.0
+  }
+}
+```
+
+The connector replies on `v1/devices/me/rpc/response/{requestId}`:
+
+```json
+{ "success": true }
+```
+or on error:
+```json
+{ "error": "Object 'ai_0_…' is not commandable (no PROP_PRIORITY_ARRAY)." }
+```
+
+To call from ThingsBoard Rule Chain or REST API:
+```
+POST /api/plugins/rpc/twoway/{deviceId}
+Body: { "method": "setValue", "params": { "key": "…", "value": … }, "timeout": 5000 }
+```
+
+### 12.7 Console log output
+
+| Log line | Meaning |
+|---|---|
+| `[WB] Glueck … → subscribed to shared-attribute updates.` | Startup: subscription active |
+| `[WB←TB] Glueck …  attr  active_allowed_power_pct = 42.5` | Attribute update received + written |
+| `[WB←TB] HVAC …    rpc   ao_3_… = 21.0  (reqId=42)` | RPC received + written |
+| `[WB←TB] ERROR …: InvalidOperationException: not commandable …` | Write rejected |

@@ -81,7 +81,47 @@ namespace Connector
             Console.WriteLine("\n► Connecting MQTT clients…");
             var mqttClients = new Dictionary<DeviceConfig, IManagedMqttClient>();
             foreach (var d in cfg.Devices)
-                mqttClients[d] = await BuildMqttClientAsync(d, cfg.ThingsBoard);
+            {
+                var mqttClient = await BuildMqttClientAsync(d, cfg.ThingsBoard);
+                mqttClients[d] = mqttClient;
+
+                // ── Write-back subscriptions (opt-in per device) ──────────────
+                if (d.Writeback is { } wb)
+                {
+                    var writer = DeviceReaderFactory.GetWriter(d.DeviceType);
+                    if (writer is null)
+                    {
+                        Console.WriteLine(
+                            $"  [WB] WARNING: '{d.Name}' has writeback enabled but " +
+                            $"driver '{d.DeviceType}' does not implement IDeviceWriter.");
+                    }
+                    else
+                    {
+                        var conn = connections[d.ConnectionId];
+
+                        if (wb.SharedAttributes)
+                        {
+                            await mqttClient.SubscribeAsync("v1/devices/me/attributes");
+                            Console.WriteLine($"  [WB] {d.Name} → subscribed to shared-attribute updates.");
+                        }
+
+                        if (wb.Rpc)
+                        {
+                            await mqttClient.SubscribeAsync("v1/devices/me/rpc/request/+");
+                            Console.WriteLine($"  [WB] {d.Name} → subscribed to server-side RPC.");
+                        }
+
+                        // Capture loop variables for the closure
+                        var capturedDevice = d;
+                        var capturedConn   = conn;
+                        var capturedWriter = writer;
+                        var capturedClient = mqttClient;
+                        mqttClient.ApplicationMessageReceivedAsync += args =>
+                            HandleWriteBackAsync(args, capturedDevice, capturedConn,
+                                                 capturedWriter, capturedClient);
+                    }
+                }
+            }
 
             // ── Polling loop ──────────────────────────────────────────────────
             int intervalMs = cfg.Polling.IntervalSeconds * 1000;
@@ -188,6 +228,107 @@ namespace Connector
                     .WithPayload(Encoding.UTF8.GetBytes(json))
                     .WithQualityOfServiceLevel(MQTTnet.Protocol.MqttQualityOfServiceLevel.AtLeastOnce)
                     .Build());
+        }
+
+        static MqttApplicationMessage BuildMqttMessage(string topic, string json) =>
+            new MqttApplicationMessageBuilder()
+                .WithTopic(topic)
+                .WithPayload(Encoding.UTF8.GetBytes(json))
+                .WithQualityOfServiceLevel(MQTTnet.Protocol.MqttQualityOfServiceLevel.AtLeastOnce)
+                .Build();
+
+        // =====================================================================
+        //  Write-back handler – called by the per-device MQTT ApplicationMessageReceivedAsync
+        // =====================================================================
+        static async Task HandleWriteBackAsync(
+            MqttApplicationMessageReceivedEventArgs args,
+            DeviceConfig device, ConnectionConfig conn,
+            IDeviceWriter writer, IManagedMqttClient mqttClient)
+        {
+            string topic   = args.ApplicationMessage.Topic;
+            var    seg     = args.ApplicationMessage.PayloadSegment;
+            string payload = seg.Count > 0
+                ? Encoding.UTF8.GetString(seg.Array!, seg.Offset, seg.Count)
+                : "{}";
+
+            try
+            {
+                // ── Shared Attribute update ────────────────────────────────────
+                //    Payload: { "key1": value1, "key2": value2, … }
+                if (topic == "v1/devices/me/attributes")
+                {
+                    using var doc = JsonDocument.Parse(payload);
+                    foreach (var prop in doc.RootElement.EnumerateObject())
+                    {
+                        if (prop.Value.ValueKind != JsonValueKind.Number) continue;
+
+                        double val = prop.Value.GetDouble();
+                        Console.WriteLine(
+                            $"  [WB←TB] {device.Name}  attr  {prop.Name} = {val}");
+                        writer.Write(conn, device, prop.Name, val);
+                    }
+                    return;
+                }
+
+                // ── Server-side RPC ────────────────────────────────────────────
+                //    Topic:   v1/devices/me/rpc/request/{requestId}
+                //    Payload: { "method": "setValue", "params": { "key": "…", "value": … } }
+                if (topic.StartsWith("v1/devices/me/rpc/request/"))
+                {
+                    string requestId  = topic[(topic.LastIndexOf('/') + 1)..];
+                    string respTopic  = $"v1/devices/me/rpc/response/{requestId}";
+
+                    using var doc  = JsonDocument.Parse(payload);
+                    string method  = doc.RootElement.TryGetProperty("method", out var mProp)
+                        ? mProp.GetString() ?? ""
+                        : "";
+
+                    if (method == "setValue")
+                    {
+                        var rpcParams = doc.RootElement.GetProperty("params");
+                        string key = rpcParams.GetProperty("key").GetString()
+                            ?? throw new ArgumentException("RPC params.key is null.");
+                        double val = rpcParams.GetProperty("value").GetDouble();
+
+                        Console.WriteLine(
+                            $"  [WB\u2190TB] {device.Name}  rpc   {key} = {val}  (reqId={requestId})");
+                        writer.Write(conn, device, key, val);
+
+                        await mqttClient.EnqueueAsync(
+                            BuildMqttMessage(respTopic,
+                                JsonSerializer.Serialize(new { success = true })));
+                    }
+                    else
+                    {
+                        Console.WriteLine(
+                            $"  [WB\u2190TB] {device.Name}  rpc   unknown method '{method}' \u2013 ignored.");
+                        await mqttClient.EnqueueAsync(
+                            BuildMqttMessage(respTopic,
+                                JsonSerializer.Serialize(new { error = $"Unknown method '{method}'" })));
+                    }
+
+                    return;
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine(
+                    $"  [WB\u2190TB] ERROR {device.Name}: {ex.GetType().Name}: {ex.Message}");
+
+                // Send error response for RPC so the caller doesn't time out
+                if (topic.StartsWith("v1/devices/me/rpc/request/"))
+                {
+                    string requestId = topic[(topic.LastIndexOf('/') + 1)..];
+                    try
+                    {
+                        await mqttClient.EnqueueAsync(
+                            BuildMqttMessage(
+                                $"v1/devices/me/rpc/response/{requestId}",
+                                JsonSerializer.Serialize(new { error = ex.Message })));
+                    }
+                    catch { /* swallow \u2013 best effort */ }
+                }
+            }
         }
 
         // =====================================================================

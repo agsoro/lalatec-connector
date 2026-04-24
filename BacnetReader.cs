@@ -44,8 +44,9 @@ namespace Connector
     // =========================================================================
     record BacnetObjectInfo(
         BacnetObjectId ObjectId,
-        string         ObjectName,       // from PROP_OBJECT_NAME
-        string         Description = "" // from PROP_DESCRIPTION (when filter active)
+        string         ObjectName,           // from PROP_OBJECT_NAME
+        string         Description = "",     // from PROP_DESCRIPTION (when filter active)
+        bool           Commandable = false   // true when PROP_PRIORITY_ARRAY is present
     )
     {
         /// <summary>Sanitised key prefix used in ThingsBoard, e.g. "ai_0_room_temp".</summary>
@@ -73,9 +74,9 @@ namespace Connector
     }
 
     // =========================================================================
-    //  The reader
+    //  The reader + writer
     // =========================================================================
-    class BacnetReader : IDeviceReader
+    class BacnetReader : IDeviceReader, IDeviceWriter
     {
         public string DriverName => "BACnet/IP";
 
@@ -272,7 +273,8 @@ namespace Connector
         }
 
         // =====================================================================
-        //  Filter – reads PROP_OBJECT_NAME / PROP_DESCRIPTION, applies rules
+        //  Filter – reads PROP_OBJECT_NAME / PROP_DESCRIPTION, applies rules,
+        //           probes PROP_PRIORITY_ARRAY to detect commandable objects
         // =====================================================================
         static List<BacnetObjectInfo> ApplyFilter(
             BacnetClient client, BacnetAddress address,
@@ -333,11 +335,43 @@ namespace Connector
                     if (!includeDescRx!.IsMatch(description)) continue;
                 }
 
-                result.Add(new BacnetObjectInfo(oid, objectName, description));
+                // 5. Commandability probe:
+                //    BACnet-standard: only objects with PROP_PRIORITY_ARRAY are commandable.
+                //    We only probe output/value types (AO, AV, BO, BV, MO, MV) to
+                //    avoid unnecessary network I/O on sensor inputs.
+                bool commandable = false;
+                if (IsCommandableType(oid.type))
+                {
+                    try
+                    {
+                        commandable = client.ReadPropertyRequest(
+                            address, oid,
+                            BacnetPropertyIds.PROP_PRIORITY_ARRAY,
+                            out IList<BacnetValue> _);
+                    }
+                    catch { /* device may reject – treat as non-commandable */ }
+                }
+
+                result.Add(new BacnetObjectInfo(oid, objectName, description, commandable));
             }
 
             return result;
         }
+
+        /// <summary>
+        /// Returns true for BACnet object types that always have a priority array
+        /// and are therefore operator-writable (commandable). Matches the Siemens
+        /// Desigo convention: AO, AV, BO, BV, MO, MV are setpoints/outputs;
+        /// AI, BI, MI are sensor inputs and are never commandable.
+        /// </summary>
+        static bool IsCommandableType(BacnetObjectTypes t) => t is
+            BacnetObjectTypes.OBJECT_ANALOG_OUTPUT      or
+            BacnetObjectTypes.OBJECT_ANALOG_VALUE       or
+            BacnetObjectTypes.OBJECT_BINARY_OUTPUT      or
+            BacnetObjectTypes.OBJECT_BINARY_VALUE       or
+            BacnetObjectTypes.OBJECT_MULTI_STATE_OUTPUT or
+            BacnetObjectTypes.OBJECT_MULTI_STATE_VALUE;
+
 
         static string ReadObjectName(BacnetClient client, BacnetAddress address, BacnetObjectId oid)
         {
@@ -507,6 +541,88 @@ namespace Connector
             public bool                   AttributesSent  { get; set; }
             public DateTime               LastDiscovery   { get; set; } = DateTime.MinValue;
             public List<BacnetObjectInfo> CachedObjects   { get; set; } = new();
+        }
+
+        // =====================================================================
+        //  IDeviceWriter – write a value to a BACnet object's PROP_PRESENT_VALUE
+        // =====================================================================
+        public void Write(ConnectionConfig conn, DeviceConfig device, string key, double value)
+        {
+            if (device.BacnetDeviceId is null)
+                throw new InvalidOperationException(
+                    $"Device '{device.Name}' is missing bacnetDeviceId.");
+
+            var cfg = device.Bacnet
+                ?? throw new InvalidOperationException(
+                    $"Device '{device.Name}' is missing the 'bacnet' config block.");
+
+            // Resolve target object from the ThingsBoard key
+            if (!TryParseKeyToObjectId(key, out BacnetObjectId objectId))
+                throw new ArgumentException(
+                    $"Cannot parse BACnet object from key '{key}'. " +
+                    "Expected format: {type}_{instance}_{name}_{prop}, e.g. ao_3_supply_sp_value.");
+
+            // Check commandability from the cached discovery state
+            var state = GetOrCreateState(device.Name);
+            var obj   = state.CachedObjects
+                            .FirstOrDefault(o => o.ObjectId == objectId);
+
+            if (obj is null)
+                throw new KeyNotFoundException(
+                    $"Object for key '{key}' ({objectId}) not found in discovery cache for '{device.Name}'. " +
+                    "Trigger a rediscovery or check the key name.");
+
+            if (!obj.Commandable)
+                throw new InvalidOperationException(
+                    $"Object '{key}' ({objectId}) is not commandable (no PROP_PRIORITY_ARRAY). " +
+                    "Write rejected to protect the device logic.");
+
+            using var client  = OpenClient(conn);
+            var address = ResolveAddress(
+                client, conn.Host, conn.Port,
+                device.BacnetDeviceId.Value,
+                cfg.WhoIsTimeoutMs > 0 ? cfg.WhoIsTimeoutMs : 2000);
+
+            // Choose the right application tag:
+            //   Binary objects expect an ENUMERATED (0/1); all others expect REAL
+            BacnetValue bv = objectId.type is
+                BacnetObjectTypes.OBJECT_BINARY_OUTPUT or
+                BacnetObjectTypes.OBJECT_BINARY_VALUE
+                ? new BacnetValue(BacnetApplicationTags.BACNET_APPLICATION_TAG_ENUMERATED,
+                                  (uint)(value != 0 ? 1 : 0))
+                : new BacnetValue(BacnetApplicationTags.BACNET_APPLICATION_TAG_REAL,
+                                  (float)value);
+
+            bool ok = client.WritePropertyRequest(
+                address, objectId,
+                BacnetPropertyIds.PROP_PRESENT_VALUE,
+                new List<BacnetValue> { bv });
+
+            if (!ok)
+                throw new Exception(
+                    $"BACnet WriteProperty returned NAK for key '{key}' ({objectId}).");
+        }
+
+        /// <summary>
+        /// Parses a ThingsBoard key such as "ao_3_supply_temp_sp_value" into its
+        /// BacnetObjectId by extracting the short type alias and instance number
+        /// from the first two underscore-delimited tokens.
+        /// </summary>
+        static bool TryParseKeyToObjectId(string key, out BacnetObjectId result)
+        {
+            result = default;
+
+            // Split on '_'; first token = type alias, second = instance number
+            var parts = key.Split('_');
+            if (parts.Length < 2) return false;
+
+            if (!uint.TryParse(parts[1], out uint instance)) return false;
+
+            if (!_typeAliases.TryGetValue(parts[0], out BacnetObjectTypes objType))
+                return false;   // only well-known short aliases are accepted for writes
+
+            result = new BacnetObjectId(objType, instance);
+            return true;
         }
     }
 }

@@ -66,7 +66,27 @@
       "name":         "Glueck Controller Zone 1",
       "deviceType":   "glueck",
       "connectionId": "modbus-building-a",
-      "slaveId":      3
+      "slaveId":      3,
+
+      // ── Writable registers ─────────────────────────────────────────────────
+      // Each entry maps a ThingsBoard key to a Modbus holding register (or coil).
+      //
+      //   key     – ThingsBoard attribute/telemetry key
+      //   address – 0-based register address: decimal ("4656") or hex ("0x1230")
+      //   type    – "float32-be" | "int32-be" | "uint32-be" | "int16" | "uint16" | "coil"
+      //             Defaults to "float32-be" if omitted.
+      //
+      // Keep this list in sync with the hardware register map.
+      "writableRegisters": [
+        { "key": "active_allowed_power_pct", "address": "0x1230", "type": "float32-be" }
+      ],
+
+      // ── Write-back (opt-in) ────────────────────────────────────────────────
+      // Remove or set both to false to disable write-back entirely.
+      "writeback": {
+        "sharedAttributes": true,   // write when a ThingsBoard shared attribute changes
+        "rpc":              true    // write when a ThingsBoard server-side RPC fires
+      }
     },
 
     // ── BACnet/IP device ──────────────────────────────────────────────────────
@@ -148,6 +168,23 @@
           // Repeat discovery every N minutes. 0 = never refresh.
           "refreshIntervalMinutes": 60
         }
+      },
+
+      // ── Write-back (opt-in) ────────────────────────────────────────────────
+      // The connector subscribes to the appropriate MQTT topics on this device's
+      // connection and forwards write commands to the BACnet device.
+      //
+      // Write-back targets any object discovered with PROP_PRIORITY_ARRAY
+      // (commandable objects — AO, AV, BO, BV, MO, MV on Siemens Desigo).
+      // Read-only sensor inputs (AI, BI, MI) are detected and rejected safely.
+      //
+      // RPC payload convention:
+      //   { "method": "setValue", "params": { "key": "ao_3_supply_sp_value", "value": 21.0 } }
+      //   Key format: {typeAlias}_{instance}_{sanitisedName}_{propSuffix}
+      //   e.g. ao_3_supply_sp_value → OBJECT_ANALOG_OUTPUT:3, PROP_PRESENT_VALUE
+      "writeback": {
+        "sharedAttributes": true,   // write when a ThingsBoard shared attribute changes
+        "rpc":              true    // write when a ThingsBoard server-side RPC fires
       }
     }
   ]
