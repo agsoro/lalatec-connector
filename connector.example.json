@@ -1,0 +1,154 @@
+{
+  // Copy this file to connector.json and fill in your values.
+
+  "thingsboard": {
+    "host":          "your-thingsboard-host.example.com",
+    "httpPort":      8080,
+    "mqttPort":      1883,
+    "adminEmail":    "tenant@thingsboard.org",
+    "adminPassword": "YOUR_PASSWORD_HERE"
+  },
+
+  "polling": {
+    // How often all devices are read, in seconds.
+    "intervalSeconds": 30
+  },
+
+  // ── Connections ────────────────────────────────────────────────────────────
+  // Define one entry per physical network endpoint.
+  // Devices reference connections by "id".
+
+  "connections": [
+    {
+      "id":   "modbus-building-a",
+      "type": "modbus-tcp",
+      "host": "192.168.1.100",
+      "port": 502
+    },
+    {
+      "id":   "modbus-building-b",
+      "type": "modbus-tcp",
+      "host": "192.168.1.101",
+      "port": 502
+    },
+    {
+      "id":   "bacnet-hvac",
+      "type": "bacnet-ip",
+      "host": "192.168.1.200",
+      "port": 47808            // standard BACnet/IP port
+    }
+  ],
+
+  // ── Devices ────────────────────────────────────────────────────────────────
+  // Supported deviceTypes:
+  //   "janitza"      → JanitzaReader  (Modbus TCP, requires slaveId)
+  //   "glueck"       → GlueckReader   (Modbus TCP, requires slaveId)
+  //   "bacnet-generic" → BacnetReader (BACnet/IP, requires bacnetDeviceId + bacnet block)
+
+  "devices": [
+
+    // ── Janitza energy meter ──────────────────────────────────────────────────
+    {
+      "name":         "Main Meter Building A",
+      "deviceType":   "janitza",
+      "connectionId": "modbus-building-a",
+      "slaveId":      1
+    },
+    {
+      "name":         "Sub Meter Floor 2",
+      "deviceType":   "janitza",
+      "connectionId": "modbus-building-b",
+      "slaveId":      1
+    },
+
+    // ── Glück controller ──────────────────────────────────────────────────────
+    {
+      "name":         "Glueck Controller Zone 1",
+      "deviceType":   "glueck",
+      "connectionId": "modbus-building-a",
+      "slaveId":      3
+    },
+
+    // ── BACnet/IP device ──────────────────────────────────────────────────────
+    {
+      "name":           "HVAC Controller AHU-01",
+      "deviceType":     "bacnet-generic",
+      "connectionId":   "bacnet-hvac",
+      "bacnetDeviceId": 1001,
+
+      "bacnet": {
+
+        // Milliseconds to wait for a Who-Is / I-Am round-trip on startup.
+        "whoIsTimeoutMs": 2000,
+
+        // ── Object filter ──────────────────────────────────────────────────
+        // All filter fields are optional. Omit a field to apply no restriction
+        // on that dimension.
+        "filter": {
+
+          // Allowlist of object types to include. Mix and match freely:
+          //   Short alias  →  "AI" | "AO" | "AV" | "BI" | "BO" | "BV"
+          //                   "MI" | "MO" | "MV"
+          //   Full name    →  "OBJECT_ANALOG_INPUT"  (case-insensitive)
+          //   Numeric ID   →  "128"  (for proprietary/vendor types ≥ 128)
+          // Omit or set to [] to include all object types.
+          "objectTypes": [
+            "AI", "AO", "AV",
+            "BI", "BO", "BV",
+            "MI", "MO", "MV"
+          ],
+
+          // Keep only objects with instance numbers in [min, max] (inclusive).
+          // Omit to apply no instance range limit.
+          "instanceRange": { "min": 0, "max": 9999 },
+
+          // Regex applied to PROP_OBJECT_NAME.
+          // Only objects whose name matches are kept. Omit to match all.
+          "namePattern": ".",
+
+          // Regex applied to PROP_OBJECT_NAME.
+          // Objects whose name matches are removed. Omit to exclude nothing.
+          "excludeNamePattern": "^(UNUSED|SPARE|TEST)",
+
+          // Regex applied to PROP_DESCRIPTION.
+          // PROP_DESCRIPTION is only read from the device when this is set.
+          // Omit or set to null to skip description filtering entirely.
+          "descriptionPattern": null,
+
+          // Maximum number of objects to keep after all other filters.
+          // Useful as a safety cap during initial integration.
+          // 0 or null = unlimited.
+          "maxObjects": 0
+        },
+
+        // ── Properties to read ─────────────────────────────────────────────
+        // Use BacnetPropertyIds enum names (case-insensitive).
+        "properties": {
+
+          // Read on every poll → published as ThingsBoard time-series.
+          "telemetry": [
+            "PROP_PRESENT_VALUE"
+          ],
+
+          // Read once on startup (and after each rediscovery) →
+          // published as ThingsBoard device attributes.
+          "attributes": [
+            "PROP_OBJECT_NAME",
+            "PROP_DESCRIPTION",
+            "PROP_UNITS",
+            "PROP_STATUS_FLAGS"
+          ]
+        },
+
+        // ── Discovery schedule ─────────────────────────────────────────────
+        "discovery": {
+          // Run object discovery on the very first poll.
+          "onStartup": true,
+
+          // Repeat discovery every N minutes. 0 = never refresh.
+          "refreshIntervalMinutes": 60
+        }
+      }
+    }
+  ]
+}

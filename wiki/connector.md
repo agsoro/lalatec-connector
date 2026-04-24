@@ -1,0 +1,433 @@
+# lalatec-connector — Technical Documentation
+
+> **Generated:** 2026-04-24  
+> **Target:** `c:\src\thingsboard\lalatec-connector`  
+> **Runtime:** .NET 8 · C# · `net8.0`
+
+---
+
+## 1. Overview
+
+`lalatec-connector` is a self-contained .NET console service that bridges field-bus devices to [ThingsBoard](https://thingsboard.io/) using MQTT.
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│  Field devices                                                   │
+│                                                                  │
+│   Janitza UMG ──┐                                               │
+│   Glück CTRL ───┤── Modbus TCP ──────────────┐                  │
+│   (any Modbus)  ┘                            │                  │
+│                                              ▼                  │
+│   BACnet/IP device ── BACnet/IP ──► BacnetReader               │
+│                                              │                  │
+│                                              ▼                  │
+│                                       Program.cs                │
+│                                    (polling loop)               │
+│                                              │                  │
+│                            ┌─────────────────┴───────────────┐  │
+│                            │  MQTT (one client per device)   │  │
+│                            │  v1/devices/me/telemetry        │  │
+│                            │  v1/devices/me/attributes       │  │
+│                            └─────────────────────────────────┘  │
+│                                              │                  │
+│                                       ThingsBoard               │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+**Key properties:**
+- One MQTT connection per device (separate access token per device)
+- Polling interval configurable globally; all devices polled in parallel
+- BACnet devices publish both **timeseries** and **attributes**; Modbus devices publish timeseries only
+- ThingsBoard devices are auto-provisioned on startup (idempotent)
+- JWT token is refreshed automatically 5 minutes before expiry
+
+---
+
+## 2. Project structure
+
+| File | Role |
+|---|---|
+| `Program.cs` | Entry point — config load, TB provisioning, polling loop, MQTT publish |
+| `Config.cs` | JSON model — mirrors `connector.json` |
+| `IDeviceReader.cs` | `IDeviceReader` interface + shared Modbus TCP helpers |
+| `DeviceReaderFactory.cs` | Maps `deviceType` string → driver singleton |
+| `JanitzaReader.cs` | Modbus TCP driver — Janitza energy meter |
+| `GlueckReader.cs` | Modbus TCP driver — Glück controller |
+| `BacnetReader.cs` | BACnet/IP driver — full object discovery + filter + poll |
+| `ThingsBoardApi.cs` | ThingsBoard REST API — login, device provisioning, JWT refresh |
+| `connector.json` | Runtime configuration file |
+| `Connector.csproj` | Project / NuGet references |
+
+---
+
+## 3. NuGet dependencies
+
+| Package | Version | Purpose |
+|---|---|---|
+| `NModbus` | 3.0.81 | Modbus TCP master |
+| `MQTTnet` | 4.3.3.952 | MQTT client |
+| `MQTTnet.Extensions.ManagedClient` | 4.3.3.952 | Auto-reconnect MQTT wrapper |
+| `BACnet` | 3.0.2 | BACnet/IP stack (ela-compil / YABE) |
+
+---
+
+## 4. Configuration — `connector.json`
+
+The file is loaded from the executable directory. Comments (`//`) are stripped before parsing.
+
+### 4.1 Top-level structure
+
+```json
+{
+  "thingsboard": { … },
+  "polling":     { "intervalSeconds": 30 },
+  "connections": [ … ],
+  "devices":     [ … ]
+}
+```
+
+### 4.2 `thingsboard`
+
+```json
+{
+  "host":          "msr.lalatec-home.de",
+  "httpPort":      8080,
+  "mqttPort":      1883,
+  "adminEmail":    "tenant@thingsboard.org",
+  "adminPassword": "tenant"
+}
+```
+
+The REST API is used only for provisioning (startup). Data is sent over MQTT.
+
+### 4.3 `connections`
+
+Each entry defines a reusable transport endpoint:
+
+```json
+{
+  "id":   "bacnet-hvac",
+  "type": "bacnet-ip",      // "modbus-tcp" | "bacnet-ip"
+  "host": "192.168.1.200",
+  "port": 47808
+}
+```
+
+### 4.4 `devices` — common fields
+
+```json
+{
+  "name":         "HVAC Controller AHU-01",   // used as TB device name
+  "deviceType":   "bacnet",                   // see §4.5
+  "connectionId": "bacnet-hvac"               // references a connection by id
+}
+```
+
+The **access token** is derived deterministically from the device name:
+```
+"device_" + name.toLower().replace(' ','_').replace('/','_').replace('\\','_')
+```
+
+### 4.5 Device types
+
+| `deviceType` | Driver | Extra fields |
+|---|---|---|
+| `janitza` | `JanitzaReader` | `slaveId` (byte) |
+| `glueck` | `GlueckReader` | `slaveId` (byte) |
+| `bacnet` | `BacnetReader` | `bacnetDeviceId` + `bacnet` block |
+
+> **Note:** `DeviceReaderFactory` registers drivers under `"janitza"`, `"glueck"`, and `"bacnet-generic"`.
+> The config example uses `"bacnet"` — make sure the key in the factory matches what you write in the JSON.
+
+---
+
+## 5. BACnet device configuration (`bacnet` block)
+
+```jsonc
+"bacnet": {
+  "whoIsTimeoutMs": 2000,     // ms to wait for Who-Is / I-Am round-trip
+
+  "filter": { … },            // which objects to keep (see §5.1)
+  "properties": { … },        // which BACnet properties to read (see §5.2)
+  "discovery": { … }          // when to (re-)run object discovery (see §5.3)
+}
+```
+
+### 5.1 Filter block
+
+All fields are **optional**. Omitting a field means "no restriction on that dimension."  
+Filter steps are evaluated in order with short-circuit logic (network reads happen last to minimise traffic).
+
+```jsonc
+"filter": {
+  // ── Object-type allowlist ─────────────────────────────────────────
+  // Each entry can be any of:
+  //   • Short alias     "AI" | "AO" | "AV" | "BI" | "BO" | "BV"
+  //                     "MI" | "MO" | "MV"
+  //   • Full enum name  "OBJECT_ANALOG_INPUT" (BacnetObjectTypes, case-insensitive)
+  //   • Numeric type ID "128"  ← vendor/proprietary types ≥ 128
+  // Null / empty array → all object types included.
+  "objectTypes": ["AI", "AO", "AV", "BI", "BO", "BV", "MI", "MV",
+                  "OBJECT_MULTI_STATE_OUTPUT", "128"],
+
+  // ── Instance range ────────────────────────────────────────────────
+  // Keep only objects whose instance number is in [min, max] inclusive.
+  "instanceRange": { "min": 0, "max": 9999 },
+
+  // ── Name filters (applied to PROP_OBJECT_NAME) ────────────────────
+  // Include-regex: only objects whose name matches are kept.
+  "namePattern": ".",
+
+  // Exclude-regex: objects whose name matches are removed.
+  // Applied after namePattern.
+  "excludeNamePattern": "^(UNUSED|SPARE|TEST)",
+
+  // ── Description filter (applied to PROP_DESCRIPTION) ─────────────
+  // PROP_DESCRIPTION is only read when this field is non-null.
+  // Include-regex: only objects whose description matches are kept.
+  "descriptionPattern": "",       // "" matches everything
+
+  // ── Safety cap ────────────────────────────────────────────────────
+  // Stop after N objects have passed all filters. 0 / null = unlimited.
+  "maxObjects": 0
+}
+```
+
+**Filter evaluation order (cheapest first):**
+
+| Step | Check | Network I/O |
+|---|---|---|
+| 1 | Skip `OBJECT_DEVICE` itself | none |
+| 2 | `objectTypes` allowlist | none |
+| 3 | `instanceRange` | none |
+| 4 | `namePattern` / `excludeNamePattern` | reads `PROP_OBJECT_NAME` |
+| 5 | `descriptionPattern` | reads `PROP_DESCRIPTION` |
+| 6 | `maxObjects` cap | none |
+
+### 5.2 Properties block
+
+Controls which BACnet properties are read from each discovered object.
+
+```jsonc
+"properties": {
+  // Published to v1/devices/me/telemetry on every poll (timestamped).
+  "telemetry": ["PROP_PRESENT_VALUE"],
+
+  // Published to v1/devices/me/attributes once on startup
+  // and again after each rediscovery.
+  "attributes": [
+    "PROP_OBJECT_NAME",
+    "PROP_DESCRIPTION",
+    "PROP_UNITS",
+    "PROP_STATUS_FLAGS"
+  ]
+}
+```
+
+Property names are `BacnetPropertyIds` enum names (case-insensitive).
+
+### 5.3 Discovery block
+
+```jsonc
+"discovery": {
+  "onStartup": true,              // run discovery on first poll
+  "refreshIntervalMinutes": 60    // re-discover every N minutes (0 = never)
+}
+```
+
+Discovery reads `PROP_OBJECT_LIST` from the device object.  
+If the bulk read fails (some devices segment the list), the driver falls back to index-by-index reading
+(BACnet spec §12.11 — array index 0 = count, 1…N = entries).
+
+---
+
+## 6. BACnet driver internals (`BacnetReader.cs`)
+
+### 6.1 Data flow per poll cycle
+
+```
+ReadFull(conn, device)
+  │
+  ├─ OpenClient()               → BacnetClient (UDP, exclusive port)
+  ├─ ResolveAddress()           → BacnetAddress
+  │    ├─ construct direct IP address from config (unicast)
+  │    └─ broadcast WhoIs → wait for I-Am (confirms liveness)
+  │         └─ fall back to direct address if no I-Am arrives
+  │
+  ├─ [if discovery needed]
+  │    ├─ DiscoverObjects()     → List<BacnetObjectId>
+  │    │    ├─ ReadProperty(DEVICE, PROP_OBJECT_LIST)   [bulk]
+  │    │    └─ fallback: ReadProperty by index 1…N
+  │    │
+  │    └─ ApplyFilter()         → List<BacnetObjectInfo>
+  │         ├─ type allowlist   (no I/O)
+  │         ├─ instance range   (no I/O)
+  │         ├─ ReadObjectName() → PROP_OBJECT_NAME  (if name/desc filter active)
+  │         └─ ReadDescription()→ PROP_DESCRIPTION  (if descriptionPattern active)
+  │
+  └─ foreach cached BacnetObjectInfo
+       └─ ReadObjectProperties()
+            ├─ ReadPropertyMultiple (all props in one request)
+            └─ fallback: ReadProperty one by one
+```
+
+### 6.2 ThingsBoard key naming
+
+Each discovered object gets a **key prefix**:
+
+```
+{shortType}_{instance}_{sanitisedName}
+```
+
+Examples:
+
+| Object | Key prefix |
+|---|---|
+| `OBJECT_ANALOG_INPUT:0 "Room Temp"` | `ai_0_room_temp` |
+| `OBJECT_BINARY_VALUE:5 "Fan On/Off"` | `bv_5_fan_on_off` |
+| `OBJECT_MULTI_STATE_VALUE:12 "Mode"` | `mv_12_mode` |
+
+Short type names:
+
+| Enum | Alias |
+|---|---|
+| `OBJECT_ANALOG_INPUT` | `ai` |
+| `OBJECT_ANALOG_OUTPUT` | `ao` |
+| `OBJECT_ANALOG_VALUE` | `av` |
+| `OBJECT_BINARY_INPUT` | `bi` |
+| `OBJECT_BINARY_OUTPUT` | `bo` |
+| `OBJECT_BINARY_VALUE` | `bv` |
+| `OBJECT_MULTI_STATE_INPUT` | `mi` |
+| `OBJECT_MULTI_STATE_OUTPUT` | `mo` |
+| `OBJECT_MULTI_STATE_VALUE` | `mv` |
+| `OBJECT_DEVICE` | `dev` |
+| anything else | lowercased enum name without `OBJECT_` prefix |
+
+The full key for a **telemetry** or **attribute** property: `{prefix}_{propSuffix}`
+
+| `BacnetPropertyIds` | Suffix |
+|---|---|
+| `PROP_PRESENT_VALUE` | `value` |
+| `PROP_OBJECT_NAME` | `name` |
+| `PROP_DESCRIPTION` | `desc` |
+| `PROP_UNITS` | `units` |
+| `PROP_STATUS_FLAGS` | `status` |
+| `PROP_OUT_OF_SERVICE` | `oos` |
+| anything else | lowercased enum name without `PROP_` prefix |
+
+### 6.3 Per-device discovery state
+
+`BacnetReader` keeps a `Dictionary<string, DiscoveryState>` keyed by device name (thread-safe, locked on a private object).
+
+| Field | Meaning |
+|---|---|
+| `DiscoveryDone` | Whether initial discovery has run |
+| `LastDiscovery` | `DateTime.UtcNow` at last discovery |
+| `CachedObjects` | `List<BacnetObjectInfo>` after filter |
+| `AttributesSent` | `true` after first attribute publish; reset to `false` on rediscovery |
+
+### 6.4 `BacnetObjectInfo` record
+
+```csharp
+record BacnetObjectInfo(
+    BacnetObjectId ObjectId,
+    string         ObjectName,       // from PROP_OBJECT_NAME
+    string         Description = ""  // from PROP_DESCRIPTION (when filter active)
+)
+```
+
+---
+
+## 7. Modbus drivers
+
+Both Modbus drivers use the shared `ModbusHelper` (in `IDeviceReader.cs`).
+
+### `JanitzaReader` — Janitza UMG 604/605-PRO
+
+| Register (0-based) | Key | Unit | Conversion |
+|---|---|---|---|
+| 19020 | `power_kw` | kW | raw W ÷ 1000 |
+| 19060 | `import_kwh` | kWh | raw Wh ÷ 1000 |
+| 19062 | `export_kwh` | kWh | raw Wh ÷ 1000 |
+
+Registers are big-endian float32 (2 × 16-bit).
+
+> **Warning:** Register addresses vary by Janitza model.  
+> Verify against the [official Modbus address list](https://www.janitza.com/en/downloads/modbus-address-list) for your exact device.
+
+### `GlueckReader` — Glück controller
+
+| Register (0-based) | Key | Unit |
+|---|---|---|
+| 0x1230 (4656) | `active_allowed_power_pct` | % |
+
+---
+
+## 8. ThingsBoard publish topics
+
+| Topic | Content | When |
+|---|---|---|
+| `v1/devices/me/telemetry` | `{ "ts": <ms>, "values": { … } }` | Every poll cycle |
+| `v1/devices/me/attributes` | `{ "key": "value", … }` | Once after discovery (and after rediscovery) |
+
+MQTT QoS: **At least once (QoS 1)**.  
+The managed client queues messages during disconnects and delivers them after reconnect.
+
+---
+
+## 9. Startup sequence
+
+```
+1. Load connector.json
+2. Validate all devices reference a known connectionId
+3. Login to ThingsBoard REST API → obtain JWT
+4. EnsureDeviceAsync() for each device (create if missing, set access token)
+5. Create one ManagedMqttClient per device, connect, wait up to 8 s
+6. Enter polling loop:
+     └─ every intervalSeconds:
+          ├─ PollAndPublishAsync() for all devices in parallel (Task.WhenAll)
+          └─ RefreshIfNeededAsync() (refreshes JWT if < 5 min remaining)
+7. Ctrl+C → graceful shutdown (stop all MQTT clients)
+```
+
+---
+
+## 10. Adding a new device driver
+
+1. Create `MyDeviceReader.cs` implementing `IDeviceReader`:
+   ```csharp
+   class MyDeviceReader : IDeviceReader
+   {
+       public string DriverName => "MyDriver";
+       public Telemetry Read(ConnectionConfig conn, DeviceConfig device) { … }
+   }
+   ```
+2. Register it in `DeviceReaderFactory.cs`:
+   ```csharp
+   ["mydevice"] = new MyDeviceReader(),
+   ```
+3. Add a device entry in `connector.json`:
+   ```json
+   { "name": "My Device", "deviceType": "mydevice", "connectionId": "…" }
+   ```
+
+If the driver also returns **attributes**, implement a `ReadFull()` method returning a result type
+with both `Telemetry` and `Attributes` bags, and handle it in `Program.PollAndPublishAsync()`
+the same way `BacnetReader` does.
+
+---
+
+## 11. Running the connector
+
+```powershell
+# Development
+cd c:\src\thingsboard\lalatec-connector
+dotnet run
+
+# Production build
+dotnet publish -c Release -o ./publish
+./publish/Connector.exe
+```
+
+`connector.json` must be present next to the executable
+(copied automatically by the build via `CopyToOutputDirectory: PreserveNewest`).
