@@ -46,10 +46,11 @@ namespace Connector
     // =========================================================================
     record BacnetObjectInfo(
         BacnetObjectId ObjectId,
-        string         ObjectName,           // from PROP_OBJECT_NAME
+        string         ObjectName,           // technical path (from PROP_OBJECT_NAME)
+        List<string>   NamingPath,           // friendly path segments (from prop 4397)
+        string         NameExtension = "",    // friendly alias (from prop 4438)
         string         Description   = "",   // from PROP_DESCRIPTION
         bool           Commandable   = false, // true when PROP_PRIORITY_ARRAY present
-        string         NameExtension = "",    // from PROP_NAME_EXTENSION (4438)
         int            Category      = -1     // from PROP_CATEGORY (4941)
     )
     {
@@ -58,14 +59,18 @@ namespace Connector
         {
             get
             {
-                // Prioritise NameExtension (short suffix) if available.
-                // Fallback to the last segment of ObjectName (path).
-                string baseName = !string.IsNullOrWhiteSpace(NameExtension)
-                    ? NameExtension
+                // Priority for friendly name:
+                // 1. Last segment of NamingPath (prop 4397)
+                // 2. NameExtension (prop 4438)
+                // 3. Last segment of ObjectName (technical path)
+                string friendly = NamingPath.Any() ? NamingPath.Last() : NameExtension;
+                
+                string baseName = !string.IsNullOrWhiteSpace(friendly)
+                    ? friendly
                     : (ObjectName.Contains('.')
                         ? ObjectName[(ObjectName.LastIndexOf('.') + 1)..]
                         : ObjectName);
-
+ 
                 return $"{ShortTypeName(ObjectId.type)}_{ObjectId.instance}_" + Sanitise(baseName);
             }
         }
@@ -108,8 +113,7 @@ namespace Connector
         readonly object                              _stateLock     = new();
 
         const BacnetPropertyIds PropNameExtension = (BacnetPropertyIds)4438;
-        const BacnetPropertyIds PropCategory      = (BacnetPropertyIds)4431; // Wait, I saw 4941 in my search, but let me check 4431 too. 
-        // Actually, 4941 was the one with values 0-7 in the dump.
+        const BacnetPropertyIds PropNamingPath    = (BacnetPropertyIds)4397;
         const BacnetPropertyIds PropCategory4941  = (BacnetPropertyIds)4941;
 
         // =====================================================================
@@ -235,14 +239,21 @@ namespace Connector
             var objectIds   = new List<BacnetObjectId>();
 
             // Try reading the whole list at once first
-            if (client.ReadPropertyRequest(address, deviceObjId,
-                    BacnetPropertyIds.PROP_OBJECT_LIST, out IList<BacnetValue> listValues))
+            try
             {
-                foreach (var v in listValues)
-                    if (v.Value is BacnetObjectId oid)
-                        objectIds.Add(oid);
+                if (client.ReadPropertyRequest(address, deviceObjId,
+                        BacnetPropertyIds.PROP_OBJECT_LIST, out IList<BacnetValue> listValues))
+                {
+                    foreach (var v in listValues)
+                        if (v.Value is BacnetObjectId oid)
+                            objectIds.Add(oid);
 
-                return objectIds;
+                    return objectIds;
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"  [BACnet] Bulk PROP_OBJECT_LIST read failed: {ex.Message}");
             }
 
             // Fallback: some devices segment PROP_OBJECT_LIST – read index 0 for count
@@ -398,19 +409,20 @@ namespace Connector
                     catch { /* device may reject – treat as non-commandable */ }
                 }
 
-                // 6. Name extension (Desigo proprietary 4438)
+                // 6. Friendly properties (Deziko proprietary)
                 string nameExt = ReadStringProp(client, address, oid, PropNameExtension);
-
-                // 7. Category (Desigo proprietary 4941)
+                var namingPath = ReadStringListProp(client, address, oid, PropNamingPath);
+ 
+                // 7. Category (Deziko proprietary 4941)
                 ReadIntProp(client, address, oid, PropCategory4941, out int category);
-
-                result.Add(new BacnetObjectInfo(oid, objectName, description, commandable, nameExt, category));
+ 
+                result.Add(new BacnetObjectInfo(oid, objectName, namingPath, nameExt, description, commandable, category));
             }
 
             return result;
         }
 
-        static string ReadStringProp(BacnetClient client, BacnetAddress address, BacnetObjectId oid, BacnetPropertyIds propId)
+        public static string ReadStringProp(BacnetClient client, BacnetAddress address, BacnetObjectId oid, BacnetPropertyIds propId)
         {
             try
             {
@@ -419,6 +431,24 @@ namespace Connector
             }
             catch { /* ignore */ }
             return "";
+        }
+
+        public static List<string> ReadStringListProp(BacnetClient client, BacnetAddress address, BacnetObjectId oid, BacnetPropertyIds propId)
+        {
+            var result = new List<string>();
+            try
+            {
+                if (client.ReadPropertyRequest(address, oid, propId, out IList<BacnetValue> vals))
+                {
+                    foreach (var v in vals)
+                    {
+                        string? s = v.Value?.ToString();
+                        if (!string.IsNullOrEmpty(s)) result.Add(s);
+                    }
+                }
+            }
+            catch { /* ignore */ }
+            return result;
         }
 
         static bool ReadIntProp(BacnetClient client, BacnetAddress address, BacnetObjectId oid, BacnetPropertyIds propId, out int result)

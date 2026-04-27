@@ -1,4 +1,4 @@
-﻿// DezikoProvisioner.cs – materialises a DezikoTree into ThingsBoard Assets + Relations
+// DezikoProvisioner.cs – materialises a DezikoTree into ThingsBoard Assets + Relations
 //
 //  Model produced in ThingsBoard:
 //
@@ -81,19 +81,20 @@ namespace Connector
         {
             ct.ThrowIfCancellationRequested();
 
-            // The TB asset name is the last dot-segment; it must be unique within a
-            // given level of the tree.  If two sibling views share the same short name
-            // (rare in Deziko but possible), we append the instance number.
-            string assetName = node.ShortName;
+            // The TB asset name is the friendly name.
+            string assetName = node.FriendlyName;
+            if (string.IsNullOrEmpty(assetName)) assetName = node.ShortName;
 
             string assetId = await api.EnsureAssetAsync(assetName, assetType);
             c.Assets++;
-            Console.WriteLine($"  [Hierarchy]   Asset: '{assetName}' (id={assetId})");
+            Console.WriteLine($"  [Hierarchy]   Asset: '{assetName}' (key={node.ObjectName})");
 
             // Set rich attributes on the asset
             var attrs = new Dictionary<string, string>
             {
-                ["bacnet_path"]     = node.ObjectName,
+                ["bacnet_path"]     = node.NamingPath.Any() ? string.Join(" / ", node.NamingPath) : node.ObjectName,
+                ["bacnet_key"]      = node.ObjectName,
+                ["bacnet_id"]       = node.ObjectId.ToString(),
                 ["bacnet_type"]     = node.IsView
                                         ? "view"
                                         : ShortType(node.ObjectId.type),
@@ -132,16 +133,18 @@ namespace Connector
                     // Leaf data-point: qualify the name with the parent view name to avoid
                     // collisions between identically-named points under different views.
                     string leafName = string.IsNullOrEmpty(assetName)
-                        ? child.ShortName
-                        : $"{assetName} / {child.ShortName}";
+                        ? child.FriendlyName
+                        : $"{assetName} / {child.FriendlyName}";
 
                     string leafId = await api.EnsureAssetAsync(leafName, assetType);
                     c.Assets++;
-                    Console.WriteLine($"  [Hierarchy]   Leaf:  '{leafName}' ({ShortType(child.ObjectId.type)}:{child.ObjectId.instance})");
+                    Console.WriteLine($"  [Hierarchy]   Leaf:  '{leafName}' ({child.ObjectId} / key={child.ObjectName})");
 
                     var leafAttrs = new Dictionary<string, string>
                     {
-                        ["bacnet_path"]     = child.ObjectName,
+                        ["bacnet_path"]     = child.NamingPath.Any() ? string.Join(" / ", child.NamingPath) : child.ObjectName,
+                        ["bacnet_key"]      = child.ObjectName,
+                        ["bacnet_id"]       = child.ObjectId.ToString(),
                         ["bacnet_type"]     = ShortType(child.ObjectId.type),
                         ["bacnet_instance"] = child.ObjectId.instance.ToString(),
                         ["description"]     = child.Description,
@@ -165,10 +168,9 @@ namespace Connector
                     await api.EnsureRelationAsync(leafId, "ASSET", tbDeviceId, "DEVICE");
                     c.Relations++;
 
-                    // ── Entity View for this data-point ───────────────────────
                     // The view references the leaf Asset and exposes the live
                     // 'value' timeseries plus human-readable server attributes.
-                    var evAttrs = new[] { "bacnet_path", "bacnet_type", "bacnet_instance",
+                    var evAttrs = new[] { "bacnet_path", "bacnet_key", "bacnet_id", "bacnet_type", "bacnet_instance",
                                          "description", "profile_name", "units" };
                     string evId = await api.EnsureEntityViewAsync(
                         viewName:          leafName,

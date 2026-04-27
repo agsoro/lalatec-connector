@@ -1,4 +1,4 @@
-﻿// BacnetHierarchy.cs – Deziko Structured View walker
+// BacnetHierarchy.cs – Deziko Structured View walker
 //
 //  BACnet Structured View objects (type 29) carry a PROP_SUBORDINATE_LIST (property 355)
 //  that references child objects.  Children can be other views (sub-folders) or real
@@ -29,12 +29,32 @@ namespace Connector
         public BacnetObjectId ObjectId { get; init; }
 
         /// <summary>
-        /// Raw PROP_OBJECT_NAME string, which in Deziko is a full dot-separated path
-        /// (e.g. "Building.Floor2.Room201.TempSP").
+        /// Raw PROP_OBJECT_NAME string, which in Deziko is a technical dot-separated path
+        /// (e.g. "G01'ASP01'RLT001'BSK'BSK210'FbClsd").
         /// </summary>
         public string ObjectName { get; init; } = "";
 
-        /// <summary>Last dot-segment of ObjectName – used as the TB Asset display name.</summary>
+        /// <summary>
+        /// Friendly hierarchy segments from proprietary property 4397
+        /// (e.g. ["Gebäude", "Floor 1", "Room 101", "Brandschutzklappe 210"]).
+        /// </summary>
+        public List<string> NamingPath { get; init; } = new();
+
+        /// <summary>Friendly alias from proprietary property 4438 (e.g. "BSK210").</summary>
+        public string NameExtension { get; init; } = "";
+
+        /// <summary>The friendly display name for this node.</summary>
+        public string FriendlyName
+        {
+            get
+            {
+                if (NamingPath.Any()) return NamingPath.Last();
+                if (!string.IsNullOrEmpty(NameExtension)) return NameExtension;
+                return ShortName;
+            }
+        }
+
+        /// <summary>Last dot-segment of technical ObjectName.</summary>
         public string ShortName  => string.IsNullOrWhiteSpace(ObjectName)
             ? ObjectId.ToString()
             : ObjectName.Contains('.')
@@ -74,6 +94,8 @@ namespace Connector
         const BacnetPropertyIds PropStructuredObjectList = (BacnetPropertyIds)209; // PROP_STRUCTURED_OBJECT_LIST
         const BacnetPropertyIds PropSubordinateList      = (BacnetPropertyIds)355; // PROP_SUBORDINATE_LIST
         const BacnetPropertyIds PropProfileName          = (BacnetPropertyIds)168; // PROP_PROFILE_NAME
+        const BacnetPropertyIds PropNamingPath           = (BacnetPropertyIds)4397; // Naming Path (Array of strings)
+        const BacnetPropertyIds PropNameExtension        = (BacnetPropertyIds)4438; // Name Extension (String)
 
         // ── Public entry point ────────────────────────────────────────────────
 
@@ -130,13 +152,18 @@ namespace Connector
                                                 PropProfileName)
                                  ?? "";
 
+            var namingPath = ReadStringListProp(client, address, viewId, PropNamingPath);
+            string nameExt = ReadStringProp(client, address, viewId, PropNameExtension) ?? "";
+
             var node = new DezikoNode
             {
-                ObjectId    = viewId,
-                ObjectName  = objectName,
-                Description = description,
-                ProfileName = profileName,
-                IsView      = true,
+                ObjectId      = viewId,
+                ObjectName    = objectName,
+                NamingPath    = namingPath,
+                NameExtension = nameExt,
+                Description   = description,
+                ProfileName   = profileName,
+                IsView        = true,
             };
 
             // Read PROP_SUBORDINATE_LIST
@@ -187,14 +214,19 @@ namespace Connector
             // PROP_UNITS is an enum value – read as raw and convert to string
             string units = ReadUnitsProp(client, address, oid);
 
+            var namingPath = ReadStringListProp(client, address, oid, PropNamingPath);
+            string nameExt = ReadStringProp(client, address, oid, PropNameExtension) ?? "";
+
             return new DezikoNode
             {
-                ObjectId    = oid,
-                ObjectName  = objectName,
-                Description = description,
-                ProfileName = profileName,
-                Units       = units,
-                IsView      = false,
+                ObjectId      = oid,
+                ObjectName    = objectName,
+                NamingPath    = namingPath,
+                NameExtension = nameExt,
+                Description   = description,
+                ProfileName   = profileName,
+                Units         = units,
+                IsView        = false,
             };
         }
 
@@ -213,6 +245,27 @@ namespace Connector
             }
             catch { /* property not available */ }
             return null;
+        }
+
+        static List<string> ReadStringListProp(
+            BacnetClient client, BacnetAddress address,
+            BacnetObjectId oid, BacnetPropertyIds propId)
+        {
+            var result = new List<string>();
+            try
+            {
+                if (client.ReadPropertyRequest(address, oid, propId,
+                        out IList<BacnetValue> vals))
+                {
+                    foreach (var v in vals)
+                    {
+                        string? s = v.Value?.ToString();
+                        if (!string.IsNullOrEmpty(s)) result.Add(s);
+                    }
+                }
+            }
+            catch { /* property not available or bulk read failed */ }
+            return result;
         }
 
         /// <summary>
@@ -252,15 +305,45 @@ namespace Connector
             var result = new List<BacnetObjectId>();
             try
             {
+                // Attempt bulk read first
                 if (client.ReadPropertyRequest(address, targetObj, propId,
                         out IList<BacnetValue> vals))
                 {
                     foreach (var v in vals)
                         if (v.Value is BacnetObjectId oid)
                             result.Add(oid);
+                    return result;
                 }
             }
-            catch { /* property may not be supported */ }
+            catch (Exception ex)
+            {
+                 Console.WriteLine($"  [Hierarchy] Bulk {propId} read failed for {targetObj}: {ex.Message} – using index fallback…");
+            }
+
+            try
+            {
+                // Fallback: read count (index 0) then each entry
+                if (!client.ReadPropertyRequest(address, targetObj,
+                        propId, out IList<BacnetValue> countVal, arrayIndex: 0)
+                    || countVal.Count == 0)
+                    return result;
+
+                uint count = Convert.ToUInt32(countVal[0].Value);
+                for (uint i = 1; i <= count; i++)
+                {
+                    if (client.ReadPropertyRequest(address, targetObj,
+                            propId, out IList<BacnetValue> entry, arrayIndex: i)
+                        && entry.Count > 0
+                        && entry[0].Value is BacnetObjectId eid)
+                    {
+                        result.Add(eid);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"  [Hierarchy] WARN: Could not read {propId} of {targetObj}: {ex.Message}");
+            }
             return result;
         }
 
@@ -285,7 +368,14 @@ namespace Connector
                         ExtractObjectId(v, result);
                     return result;
                 }
+            }
+            catch (Exception ex)
+            {
+                 Console.WriteLine($"  [Hierarchy] Bulk SubordinateList read failed for {viewId}: {ex.Message} – using index fallback…");
+            }
 
+            try
+            {
                 // Fallback: read count (index 0) then each entry
                 if (!client.ReadPropertyRequest(address, viewId,
                         PropSubordinateList, out IList<BacnetValue> countVal, arrayIndex: 0)

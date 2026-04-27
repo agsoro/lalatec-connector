@@ -2,7 +2,6 @@
 # with hardcoded Windows paths (C:\Program Files\...) that break Linux Docker builds.
 bin/
 obj/
-publish/
 out/
 
 # IDE / OS noise

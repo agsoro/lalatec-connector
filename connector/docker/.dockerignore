@@ -1,7 +1,6 @@
 # Build artefacts
 bin/
 obj/
-publish/
 out/
 
 # Runtime secret – never bake into the image; inject at runtime
