@@ -60,6 +60,14 @@ static BacnetValue ParseJsonValue(JsonElement el, BacnetApplicationTags tag)
 {
     if (el.ValueKind == JsonValueKind.Null) return new BacnetValue(BacnetApplicationTags.BACNET_APPLICATION_TAG_NULL, null);
     
+    if (el.ValueKind == JsonValueKind.Array)
+    {
+        var list = new List<object?>();
+        foreach (var item in el.EnumerateArray())
+            list.Add(ParseJsonValue(item, tag).Value);
+        return new BacnetValue(tag, list);
+    }
+
     object val = tag switch
     {
         BacnetApplicationTags.BACNET_APPLICATION_TAG_BOOLEAN    => el.GetBoolean(),
@@ -68,10 +76,23 @@ static BacnetValue ParseJsonValue(JsonElement el, BacnetApplicationTags tag)
         BacnetApplicationTags.BACNET_APPLICATION_TAG_UNSIGNED_INT => el.GetUInt32(),
         BacnetApplicationTags.BACNET_APPLICATION_TAG_SIGNED_INT   => el.GetInt32(),
         BacnetApplicationTags.BACNET_APPLICATION_TAG_ENUMERATED   => el.GetUInt32(),
+        BacnetApplicationTags.BACNET_APPLICATION_TAG_DATE         => DateTime.Parse(el.GetString() ?? "0001-01-01"),
+        BacnetApplicationTags.BACNET_APPLICATION_TAG_TIME         => DateTime.Parse(el.GetString() ?? "00:00:00"),
+        BacnetApplicationTags.BACNET_APPLICATION_TAG_BIT_STRING   => BacnetBitString.Parse(el.GetString() ?? ""),
+        BacnetApplicationTags.BACNET_APPLICATION_TAG_OCTET_STRING => HexToBytes(el.GetString() ?? ""),
         BacnetApplicationTags.BACNET_APPLICATION_TAG_OBJECT_ID   => BacnetObjectId.Parse(el.GetString() ?? ""),
         _ => el.GetString() ?? ""
     };
     return new BacnetValue(tag, val);
+}
+
+static byte[] HexToBytes(string hex)
+{
+    if (hex.Length % 2 != 0) return Array.Empty<byte>();
+    byte[] bytes = new byte[hex.Length / 2];
+    for (int i = 0; i < bytes.Length; i++)
+        bytes[i] = Convert.ToByte(hex.Substring(i * 2, 2), 16);
+    return bytes;
 }
 
 // ── Derived Metadata ──────────────────────────────────────────────────────────

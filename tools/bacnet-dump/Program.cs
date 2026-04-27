@@ -29,6 +29,8 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Threading;
 
+
+
 // ─── Deziko / BACnet extension property IDs ─────────────────────────────────
 // These are standard ASHRAE 135 property IDs that Deziko actively uses
 // for its engineering hierarchy.  They are not present in the ela-compil enum
@@ -309,6 +311,16 @@ else if (jsonOutput)
 else
     DumpTable(client, address, objects, propsToRead);
 
+Info($"Done. Objects dumped: {objects.Count}");
+
+if (AnomalyTracker.Items.Count > 0)
+{
+    Console.Error.WriteLine("\n=== ANOMALY SUMMARY ===");
+    foreach (var a in AnomalyTracker.Items.Distinct())
+        Console.Error.WriteLine($"[!] {a}");
+    Console.Error.WriteLine("========================\n");
+}
+
 client.Dispose();
 return 0;
 
@@ -473,9 +485,25 @@ static void DumpSimJson(
     Console.WriteLine(JsonSerializer.Serialize(simData, opts));
 }
 
-static object SerializeValueForSim(BacnetValue v)
+static object? SerializeValueForSim(BacnetValue v)
 {
     if (v.Value is null) return null;
+
+    // 1. Handle Nested BacnetValues or Collections (Schedules, Lists, etc.)
+    if (v.Value is BacnetValue nested) return SerializeValueForSim(nested);
+    
+    if (v.Value is System.Collections.IEnumerable en && !(v.Value is string) && !(v.Value is byte[]))
+    {
+        var list = new List<object?>();
+        foreach (var item in en)
+        {
+            if (item is BacnetValue bv) list.Add(SerializeValueForSim(bv));
+            else list.Add(SerializeValueForSim(new BacnetValue(v.Tag, item)));
+        }
+        return list;
+    }
+
+    // 2. Handle Base Types
     return v.Tag switch
     {
         BacnetApplicationTags.BACNET_APPLICATION_TAG_BOOLEAN    => (bool)v.Value,
@@ -484,10 +512,15 @@ static object SerializeValueForSim(BacnetValue v)
         BacnetApplicationTags.BACNET_APPLICATION_TAG_UNSIGNED_INT => Convert.ToUInt32(v.Value),
         BacnetApplicationTags.BACNET_APPLICATION_TAG_SIGNED_INT   => Convert.ToInt32(v.Value),
         BacnetApplicationTags.BACNET_APPLICATION_TAG_ENUMERATED   => Convert.ToUInt32(v.Value),
-        BacnetApplicationTags.BACNET_APPLICATION_TAG_OBJECT_ID   => v.Value.ToString(),
-        _ => v.Value.ToString()
+        BacnetApplicationTags.BACNET_APPLICATION_TAG_DATE         => ((DateTime)v.Value).ToString("yyyy-MM-dd"),
+        BacnetApplicationTags.BACNET_APPLICATION_TAG_TIME         => ((DateTime)v.Value).ToString("HH:mm:ss"),
+        BacnetApplicationTags.BACNET_APPLICATION_TAG_BIT_STRING   => v.Value.ToString(),
+        BacnetApplicationTags.BACNET_APPLICATION_TAG_OCTET_STRING => v.Value is byte[] b ? BitConverter.ToString(b).Replace("-", "") : v.Value.ToString(),
+        BacnetApplicationTags.BACNET_APPLICATION_TAG_OBJECT_ID   => v.Value.ToString() ?? "",
+        _ => v.Value.ToString() ?? ""
     };
 }
+
 
 // ═══════════════════════════════════════════════════════════════════════════════
 //  BACnet helpers
@@ -516,6 +549,7 @@ static List<BacnetObjectId> ReadObjectList(
     catch (Exception ex)
     {
         Warn($"Bulk PROP_OBJECT_LIST read failed ({ex.Message}) – switching to indexed fallback…");
+        AnomalyTracker.Track($"Object list bulk read failed: {ex.Message}");
     }
 
     // Indexed fallback: read count at array index 0, then each entry by 1-based index.
@@ -585,62 +619,87 @@ static string? ReadStringProp(
 /// </summary>
 static Dictionary<BacnetPropertyIds, IList<BacnetValue>> ReadAllProperties(
     BacnetClient client, BacnetAddress address,
-    BacnetObjectId oid, BacnetPropertyIds[] propIds)
+    BacnetObjectId oid, BacnetPropertyIds[] defaultPropIds)
 {
     var result = new Dictionary<BacnetPropertyIds, IList<BacnetValue>>();
-
-    // Build RPM request
-    var propRefs = propIds
-        .Select(p => new BacnetPropertyReference((uint)p, uint.MaxValue))
-        .ToList();
-    var readReq = new List<BacnetReadAccessSpecification>
+    
+    // 1. Discover all supported properties via PROP_PROPERTY_LIST (371)
+    // This allows us to find proprietary/manufacturer-specific properties.
+    var propIds = defaultPropIds.ToList();
+    try
     {
-        new BacnetReadAccessSpecification(oid, propRefs)
-    };
-
-    if (client.ReadPropertyMultipleRequest(address, readReq, out IList<BacnetReadAccessResult> rpmResults))
-    {
-        foreach (var res in rpmResults)
+        if (client.ReadPropertyRequest(address, oid, (BacnetPropertyIds)371, out IList<BacnetValue> listVals))
         {
+            AnomalyTracker.Track($"Device supports dynamic property list on {oid}");
+            foreach (var v in listVals)
+            {
+                if (v.Value is uint pid && !propIds.Contains((BacnetPropertyIds)pid))
+                    propIds.Add((BacnetPropertyIds)pid);
+            }
+        }
+    }
+    catch { /* Not supported */ }
+
+    // 2. Try bulk read using PROP_ALL (8) - fastest if the device supports it
+    try 
+    {
+        var allReq = new List<BacnetReadAccessSpecification> {
+            new(oid, new List<BacnetPropertyReference> { new((uint)BacnetPropertyIds.PROP_ALL, uint.MaxValue) })
+        };
+        if (client.ReadPropertyMultipleRequest(address, allReq, out var allResults) && allResults.Count > 0)
+        {
+            foreach (var pv in allResults[0].values)
+            {
+                var pid = (BacnetPropertyIds)pv.property.propertyIdentifier;
+                if (pv.value != null && pv.value.Count > 0 && pv.value[0].Tag != BacnetApplicationTags.BACNET_APPLICATION_TAG_ERROR)
+                    result[pid] = pv.value;
+            }
+            if (result.Count > 5) return result; 
+        }
+    } catch { }
+
+    // 3. Chunked RPM read (to avoid APDU size limits while remaining efficient)
+    int chunkSize = 15; 
+    for (int i = 0; i < propIds.Count; i += chunkSize)
+    {
+        var chunk = propIds.Skip(i).Take(chunkSize).ToList();
+        var refs = chunk.Select(p => new BacnetPropertyReference((uint)p, uint.MaxValue)).ToList();
+        var rpmReq = new List<BacnetReadAccessSpecification> { new BacnetReadAccessSpecification(oid, refs) };
+
+        if (client.ReadPropertyMultipleRequest(address, rpmReq, out var chunkResults))
+        {
+            foreach (var res in chunkResults)
             foreach (var pv in res.values)
             {
                 var pid = (BacnetPropertyIds)pv.property.propertyIdentifier;
                 if (pv.value != null && pv.value.Count > 0)
                 {
-                    // If it's an error, only skip if it's UNKNOWN_PROPERTY (expected for optional props).
-                    // Keep other errors (e.g. READ_ACCESS_DENIED) as they are diagnostic.
                     if (pv.value[0].Tag == BacnetApplicationTags.BACNET_APPLICATION_TAG_ERROR)
                     {
                         var err = (BacnetError)pv.value[0].Value!;
-                        if (err.error_code == BacnetErrorCodes.ERROR_CODE_UNKNOWN_PROPERTY)
-                            continue;
+                        if (err.error_code == BacnetErrorCodes.ERROR_CODE_UNKNOWN_PROPERTY) continue;
+                        AnomalyTracker.Track($"{oid} {pid} failed: {err.error_class}/{err.error_code}");
                     }
                     result[pid] = pv.value;
                 }
             }
         }
-        return result;
-    }
-
-    // Fallback: one property at a time
-    foreach (var propId in propIds)
-    {
-        try
+        else
         {
-            if (client.ReadPropertyRequest(address, oid, propId, out IList<BacnetValue> vals)
-                && vals.Count > 0)
+            // Fallback to one-by-one for this chunk if the device doesn't like bulk requests
+            foreach (var pid in chunk)
             {
-                if (vals[0].Tag == BacnetApplicationTags.BACNET_APPLICATION_TAG_ERROR)
-                {
-                    var err = (BacnetError)vals[0].Value!;
-                    if (err.error_code == BacnetErrorCodes.ERROR_CODE_UNKNOWN_PROPERTY)
-                        continue;
-                }
-                result[propId] = vals;
+                try {
+                    if (client.ReadPropertyRequest(address, oid, pid, out var vals) && vals.Count > 0)
+                    {
+                        if (vals[0].Tag == BacnetApplicationTags.BACNET_APPLICATION_TAG_ERROR) continue;
+                        result[pid] = vals;
+                    }
+                } catch { }
             }
         }
-        catch { /* transport error / timeout - skip */ }
     }
+
     return result;
 }
 
@@ -785,4 +844,10 @@ Examples:
   bacnet-dump localhost 1001 --filter "*" --all-props
   bacnet-dump localhost 1001 --filter "BI*" --json
 """);
+}
+
+public static class AnomalyTracker 
+{
+    public static List<string> Items = new();
+    public static void Track(string msg) { lock(Items) Items.Add(msg); }
 }
