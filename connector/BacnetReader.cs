@@ -1,4 +1,4 @@
-﻿// BacnetReader.cs – BACnet/IP device reader with full object discovery and filtering
+// BacnetReader.cs – BACnet/IP device reader with full object discovery and filtering
 //
 //  Discovery flow (run on startup and optionally on a timer):
 //    1. Unicast Who-Is  →  I-Am  →  resolves BacnetAddress
@@ -47,14 +47,28 @@ namespace Connector
     record BacnetObjectInfo(
         BacnetObjectId ObjectId,
         string         ObjectName,           // from PROP_OBJECT_NAME
-        string         Description = "",     // from PROP_DESCRIPTION (when filter active)
-        bool           Commandable = false   // true when PROP_PRIORITY_ARRAY is present
+        string         Description   = "",   // from PROP_DESCRIPTION
+        bool           Commandable   = false, // true when PROP_PRIORITY_ARRAY present
+        string         NameExtension = "",    // from PROP_NAME_EXTENSION (4438)
+        int            Category      = -1     // from PROP_CATEGORY (4941)
     )
     {
-        /// <summary>Sanitised key prefix used in ThingsBoard, e.g. "ai_0_room_temp".</summary>
-        public string KeyPrefix =>
-            $"{ShortTypeName(ObjectId.type)}_{ObjectId.instance}_" +
-            Sanitise(ObjectName);
+        /// <summary>Sanitised key prefix used in ThingsBoard, e.g. "ai_0_tsu".</summary>
+        public string KeyPrefix
+        {
+            get
+            {
+                // Prioritise NameExtension (short suffix) if available.
+                // Fallback to the last segment of ObjectName (path).
+                string baseName = !string.IsNullOrWhiteSpace(NameExtension)
+                    ? NameExtension
+                    : (ObjectName.Contains('.')
+                        ? ObjectName[(ObjectName.LastIndexOf('.') + 1)..]
+                        : ObjectName);
+
+                return $"{ShortTypeName(ObjectId.type)}_{ObjectId.instance}_" + Sanitise(baseName);
+            }
+        }
 
         static string ShortTypeName(BacnetObjectTypes t) => t switch
         {
@@ -67,7 +81,9 @@ namespace Connector
             BacnetObjectTypes.OBJECT_MULTI_STATE_INPUT   => "mi",
             BacnetObjectTypes.OBJECT_MULTI_STATE_OUTPUT  => "mo",
             BacnetObjectTypes.OBJECT_MULTI_STATE_VALUE   => "mv",
+            BacnetObjectTypes.OBJECT_INTEGER_VALUE       => "iv",
             BacnetObjectTypes.OBJECT_DEVICE              => "dev",
+            (BacnetObjectTypes)264                       => "sys",
             _                                            => t.ToString().Replace("OBJECT_", "").ToLower(),
         };
 
@@ -90,6 +106,11 @@ namespace Connector
         // Per-device discovery state (keyed by device name so multiple devices work)
         readonly Dictionary<string, DiscoveryState> _stateByDevice = new();
         readonly object                              _stateLock     = new();
+
+        const BacnetPropertyIds PropNameExtension = (BacnetPropertyIds)4438;
+        const BacnetPropertyIds PropCategory      = (BacnetPropertyIds)4431; // Wait, I saw 4941 in my search, but let me check 4431 too. 
+        // Actually, 4941 was the one with values 0-7 in the dump.
+        const BacnetPropertyIds PropCategory4941  = (BacnetPropertyIds)4941;
 
         // =====================================================================
         //  IDeviceReader.Read  –  called by the polling loop
@@ -377,10 +398,42 @@ namespace Connector
                     catch { /* device may reject – treat as non-commandable */ }
                 }
 
-                result.Add(new BacnetObjectInfo(oid, objectName, description, commandable));
+                // 6. Name extension (Desigo proprietary 4438)
+                string nameExt = ReadStringProp(client, address, oid, PropNameExtension);
+
+                // 7. Category (Desigo proprietary 4941)
+                ReadIntProp(client, address, oid, PropCategory4941, out int category);
+
+                result.Add(new BacnetObjectInfo(oid, objectName, description, commandable, nameExt, category));
             }
 
             return result;
+        }
+
+        static string ReadStringProp(BacnetClient client, BacnetAddress address, BacnetObjectId oid, BacnetPropertyIds propId)
+        {
+            try
+            {
+                if (client.ReadPropertyRequest(address, oid, propId, out IList<BacnetValue> vals) && vals.Count > 0)
+                    return vals[0].Value?.ToString() ?? "";
+            }
+            catch { /* ignore */ }
+            return "";
+        }
+
+        static bool ReadIntProp(BacnetClient client, BacnetAddress address, BacnetObjectId oid, BacnetPropertyIds propId, out int result)
+        {
+            result = -1;
+            try
+            {
+                if (client.ReadPropertyRequest(address, oid, propId, out IList<BacnetValue> vals) && vals.Count > 0)
+                {
+                    result = Convert.ToInt32(vals[0].Value);
+                    return true;
+                }
+            }
+            catch { /* ignore */ }
+            return false;
         }
 
         /// <summary>
@@ -395,7 +448,8 @@ namespace Connector
             BacnetObjectTypes.OBJECT_BINARY_OUTPUT      or
             BacnetObjectTypes.OBJECT_BINARY_VALUE       or
             BacnetObjectTypes.OBJECT_MULTI_STATE_OUTPUT or
-            BacnetObjectTypes.OBJECT_MULTI_STATE_VALUE;
+            BacnetObjectTypes.OBJECT_MULTI_STATE_VALUE  or
+            BacnetObjectTypes.OBJECT_INTEGER_VALUE;
 
 
         static string ReadObjectName(BacnetClient client, BacnetAddress address, BacnetObjectId oid)
@@ -567,12 +621,27 @@ namespace Connector
             BacnetPropertyIds.PROP_UNITS          => "units",
             BacnetPropertyIds.PROP_STATUS_FLAGS   => "status",
             BacnetPropertyIds.PROP_OUT_OF_SERVICE => "oos",
+            BacnetPropertyIds.PROP_RELIABILITY    => "rel",
+            BacnetPropertyIds.PROP_EVENT_STATE    => "evt",
+            (BacnetPropertyIds)4311               => "subst_value",
+            (BacnetPropertyIds)4312               => "subst_active",
+            (BacnetPropertyIds)4340               => "last_change",
+            (BacnetPropertyIds)5092               => "io_binding",
+            (BacnetPropertyIds)5094               => "asset_id",
+            (BacnetPropertyIds)5103               => "comm_status",
             _                                     => p.ToString().Replace("PROP_", "").ToLower(),
         };
 
         static bool TryToDouble(object? v, out double result)
         {
             if (v is null) { result = 0; return false; }
+            if (v is BacnetBitString bs)
+            {
+                result = 0;
+                for (int i = 0; i < bs.bits_used; i++)
+                    if (bs.GetBit((byte)i)) result += Math.Pow(2, i);
+                return true;
+            }
             try   { result = Math.Round(Convert.ToDouble(v), 6); return true; }
             catch { result = 0; return false; }
         }

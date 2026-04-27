@@ -78,13 +78,28 @@ static BacnetValue ParseJsonValue(JsonElement el, BacnetApplicationTags tag)
         BacnetApplicationTags.BACNET_APPLICATION_TAG_ENUMERATED   => el.GetUInt32(),
         BacnetApplicationTags.BACNET_APPLICATION_TAG_DATE         => DateTime.Parse(el.GetString() ?? "0001-01-01"),
         BacnetApplicationTags.BACNET_APPLICATION_TAG_TIME         => DateTime.Parse(el.GetString() ?? "00:00:00"),
+        BacnetApplicationTags.BACNET_APPLICATION_TAG_DATETIME     => DateTime.Parse(el.GetString() ?? "0001-01-01"),
+        BacnetApplicationTags.BACNET_APPLICATION_TAG_TIMESTAMP    => DateTime.Parse(el.GetString() ?? "0001-01-01"),
         BacnetApplicationTags.BACNET_APPLICATION_TAG_BIT_STRING   => BacnetBitString.Parse(el.GetString() ?? ""),
         BacnetApplicationTags.BACNET_APPLICATION_TAG_OCTET_STRING => HexToBytes(el.GetString() ?? ""),
         (BacnetApplicationTags)0 /* CONTEXT_SPECIFIC */           => HexToBytes(el.GetString() ?? ""),
         BacnetApplicationTags.BACNET_APPLICATION_TAG_OBJECT_ID   => BacnetObjectId.Parse(el.GetString() ?? ""),
+        BacnetApplicationTags.BACNET_APPLICATION_TAG_OBJECT_PROPERTY_REFERENCE => ParseObjectPropertyReference(el.GetString() ?? ""),
         _ => el.GetString() ?? ""
     };
     return new BacnetValue(tag, val);
+}
+
+static BacnetDeviceObjectPropertyReference ParseObjectPropertyReference(string s)
+{
+    // Format: "OBJECT_TYPE:INSTANCE:PROPERTY_ID"
+    var parts = s.Split(':');
+    if (parts.Length < 2) return new BacnetDeviceObjectPropertyReference();
+    return new BacnetDeviceObjectPropertyReference
+    {
+        objectIdentifier = BacnetObjectId.Parse($"{parts[0]}:{parts[1]}"),
+        propertyIdentifier = parts.Length > 2 ? Enum.Parse<BacnetPropertyIds>(parts[2]) : BacnetPropertyIds.PROP_PRESENT_VALUE
+    };
 }
 
 static byte[] HexToBytes(string hex)
@@ -318,6 +333,12 @@ await Task.Run(async () =>
             {
                 uint v = ((uint)(e + oid.instance * 2) / 10 % 3) + 1;
                 props[BacnetPropertyIds.PROP_PRESENT_VALUE] = new List<BacnetValue> { new(BacnetApplicationTags.BACNET_APPLICATION_TAG_UNSIGNED_INT, v) };
+                changed = true;
+            }
+            else if (oid.type is BacnetObjectTypes.OBJECT_INTEGER_VALUE)
+            {
+                int v = (int)(100 + 50 * Math.Sin(2 * Math.PI * (e + oid.instance * 5) / PERIOD));
+                props[BacnetPropertyIds.PROP_PRESENT_VALUE] = new List<BacnetValue> { new(BacnetApplicationTags.BACNET_APPLICATION_TAG_SIGNED_INT, v) };
                 changed = true;
             }
 
