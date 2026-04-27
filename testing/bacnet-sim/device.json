@@ -1,0 +1,16 @@
+{
+  "meta": {
+    "deviceId": 1001,
+    "generated": "2026-04-27 17:00:00",
+    "description": "Initial placeholder"
+  },
+  "objects": [
+    {
+      "type": "OBJECT_DEVICE",
+      "instance": 1001,
+      "properties": [
+        { "id": "PROP_OBJECT_NAME", "tag": "CHARACTER_STRING", "values": ["Simulated Device"] }
+      ]
+    }
+  ]
+}
