@@ -666,7 +666,20 @@ static Dictionary<BacnetPropertyIds, IList<BacnetValue>> ReadAllProperties(
         var refs = chunk.Select(p => new BacnetPropertyReference((uint)p, uint.MaxValue)).ToList();
         var rpmReq = new List<BacnetReadAccessSpecification> { new BacnetReadAccessSpecification(oid, refs) };
 
-        if (client.ReadPropertyMultipleRequest(address, rpmReq, out var chunkResults))
+        bool chunkSuccess = false;
+        var chunkResults = new List<BacnetReadAccessResult>();
+        try
+        {
+            chunkSuccess = client.ReadPropertyMultipleRequest(address, rpmReq, out var rawResults);
+            if (chunkSuccess) chunkResults = rawResults.ToList();
+        }
+        catch (Exception ex)
+        {
+            AnomalyTracker.Track($"RPM chunk failed on {oid}: {ex.Message}");
+            chunkSuccess = false; 
+        }
+
+        if (chunkSuccess)
         {
             foreach (var res in chunkResults)
             foreach (var pv in res.values)
