@@ -80,6 +80,7 @@ static BacnetValue ParseJsonValue(JsonElement el, BacnetApplicationTags tag)
         BacnetApplicationTags.BACNET_APPLICATION_TAG_TIME         => DateTime.Parse(el.GetString() ?? "00:00:00"),
         BacnetApplicationTags.BACNET_APPLICATION_TAG_BIT_STRING   => BacnetBitString.Parse(el.GetString() ?? ""),
         BacnetApplicationTags.BACNET_APPLICATION_TAG_OCTET_STRING => HexToBytes(el.GetString() ?? ""),
+        (BacnetApplicationTags)0 /* CONTEXT_SPECIFIC */           => HexToBytes(el.GetString() ?? ""),
         BacnetApplicationTags.BACNET_APPLICATION_TAG_OBJECT_ID   => BacnetObjectId.Parse(el.GetString() ?? ""),
         _ => el.GetString() ?? ""
     };

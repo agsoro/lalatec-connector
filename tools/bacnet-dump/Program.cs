@@ -526,7 +526,7 @@ static object? SerializeValueForSim(BacnetValue v)
         BacnetApplicationTags.BACNET_APPLICATION_TAG_BIT_STRING   => v.Value.ToString(),
         BacnetApplicationTags.BACNET_APPLICATION_TAG_OCTET_STRING => v.Value is byte[] b ? BitConverter.ToString(b).Replace("-", "") : v.Value.ToString(),
         BacnetApplicationTags.BACNET_APPLICATION_TAG_OBJECT_ID   => v.Value.ToString() ?? "",
-        _ => v.Value.ToString() ?? ""
+        _ => v.Value is byte[] b ? BitConverter.ToString(b).Replace("-", "") : v.Value.ToString() ?? ""
     };
 }
 
