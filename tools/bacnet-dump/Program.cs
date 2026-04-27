@@ -605,10 +605,16 @@ static Dictionary<BacnetPropertyIds, IList<BacnetValue>> ReadAllProperties(
             foreach (var pv in res.values)
             {
                 var pid = (BacnetPropertyIds)pv.property.propertyIdentifier;
-                // Ignore error responses
-                if (pv.value != null && pv.value.Count > 0
-                    && pv.value[0].Tag != BacnetApplicationTags.BACNET_APPLICATION_TAG_ERROR)
+                if (pv.value != null && pv.value.Count > 0)
                 {
+                    // If it's an error, only skip if it's UNKNOWN_PROPERTY (expected for optional props).
+                    // Keep other errors (e.g. READ_ACCESS_DENIED) as they are diagnostic.
+                    if (pv.value[0].Tag == BacnetApplicationTags.BACNET_APPLICATION_TAG_ERROR)
+                    {
+                        var err = (BacnetError)pv.value[0].Value!;
+                        if (err.error_code == BacnetErrorCodes.ERROR_CODE_UNKNOWN_PROPERTY)
+                            continue;
+                    }
                     result[pid] = pv.value;
                 }
             }
@@ -622,13 +628,18 @@ static Dictionary<BacnetPropertyIds, IList<BacnetValue>> ReadAllProperties(
         try
         {
             if (client.ReadPropertyRequest(address, oid, propId, out IList<BacnetValue> vals)
-                && vals.Count > 0
-                && vals[0].Tag != BacnetApplicationTags.BACNET_APPLICATION_TAG_ERROR)
+                && vals.Count > 0)
             {
+                if (vals[0].Tag == BacnetApplicationTags.BACNET_APPLICATION_TAG_ERROR)
+                {
+                    var err = (BacnetError)vals[0].Value!;
+                    if (err.error_code == BacnetErrorCodes.ERROR_CODE_UNKNOWN_PROPERTY)
+                        continue;
+                }
                 result[propId] = vals;
             }
         }
-        catch { /* property not available */ }
+        catch { /* transport error / timeout - skip */ }
     }
     return result;
 }
@@ -674,6 +685,9 @@ static string FormatSingle(BacnetValue v)
         BacnetApplicationTags.BACNET_APPLICATION_TAG_ENUMERATED    =>
             v.Value is BacnetObjectTypes bot ? bot.ToString()
             : v.Value?.ToString() ?? "?",
+        BacnetApplicationTags.BACNET_APPLICATION_TAG_ERROR =>
+            v.Value is BacnetError err ? $"Error: {err.error_class} / {err.error_code}"
+            : "Error: (unknown)",
         _ => v.Value?.ToString() ?? "?",
     };
 }
