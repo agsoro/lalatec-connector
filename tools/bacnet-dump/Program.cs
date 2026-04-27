@@ -426,34 +426,66 @@ static List<BacnetObjectId> ReadObjectList(
 {
     var list = new List<BacnetObjectId>();
 
-    // Try bulk read first
-    if (client.ReadPropertyRequest(address, deviceObjId,
-            BacnetPropertyIds.PROP_OBJECT_LIST, out IList<BacnetValue> bulk))
+    // Try bulk read first.
+    // Some devices send a BACnet Abort (SEGMENTATION_NOT_SUPPORTED) when the
+    // list is too large to fit in one APDU.  The library throws in that case
+    // rather than returning false, so we catch it and fall through.
+    try
     {
-        foreach (var v in bulk)
-            if (v.Value is BacnetObjectId oid)
-                list.Add(oid);
+        if (client.ReadPropertyRequest(address, deviceObjId,
+                BacnetPropertyIds.PROP_OBJECT_LIST, out IList<BacnetValue> bulk))
+        {
+            foreach (var v in bulk)
+                if (v.Value is BacnetObjectId oid)
+                    list.Add(oid);
+            return list;
+        }
+    }
+    catch (Exception ex)
+    {
+        Warn($"Bulk PROP_OBJECT_LIST read failed ({ex.Message}) – switching to indexed fallback…");
+    }
+
+    // Indexed fallback: read count at array index 0, then each entry by 1-based index.
+    // Per BACnet spec §12.11.7 the array index 0 always returns the number of entries.
+    Warn("Reading PROP_OBJECT_LIST entry-by-entry (device does not support bulk read)…");
+
+    IList<BacnetValue>? countVals = null;
+    try
+    {
+        client.ReadPropertyRequest(address, deviceObjId,
+            BacnetPropertyIds.PROP_OBJECT_LIST, out countVals, arrayIndex: 0);
+    }
+    catch (Exception ex)
+    {
+        Error($"Cannot read PROP_OBJECT_LIST count: {ex.Message}");
         return list;
     }
 
-    // Segmented fallback: read count at index 0, then each entry
-    Warn("Bulk PROP_OBJECT_LIST failed – using indexed fallback…");
-    if (!client.ReadPropertyRequest(address, deviceObjId,
-            BacnetPropertyIds.PROP_OBJECT_LIST, out IList<BacnetValue> countVals, arrayIndex: 0))
+    if (countVals == null || countVals.Count == 0)
     {
-        Error("Cannot read PROP_OBJECT_LIST count.");
+        Error("Cannot read PROP_OBJECT_LIST count: empty response.");
         return list;
     }
 
     uint count = Convert.ToUInt32(countVals[0].Value);
+    Info($"PROP_OBJECT_LIST: {count} entries – reading individually…");
+
     for (uint i = 1; i <= count; i++)
     {
-        if (client.ReadPropertyRequest(address, deviceObjId,
-                BacnetPropertyIds.PROP_OBJECT_LIST, out IList<BacnetValue> entry, arrayIndex: i)
-            && entry.Count > 0
-            && entry[0].Value is BacnetObjectId eid)
+        try
         {
-            list.Add(eid);
+            if (client.ReadPropertyRequest(address, deviceObjId,
+                    BacnetPropertyIds.PROP_OBJECT_LIST, out IList<BacnetValue> entry, arrayIndex: i)
+                && entry.Count > 0
+                && entry[0].Value is BacnetObjectId eid)
+            {
+                list.Add(eid);
+            }
+        }
+        catch (Exception ex)
+        {
+            Warn($"  index {i}: skipped ({ex.Message})");
         }
     }
     return list;
