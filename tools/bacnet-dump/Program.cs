@@ -1,4 +1,4 @@
-﻿// bacnet-dump – CLI tool to dump all objects and their properties from a BACnet/IP device.
+// bacnet-dump – CLI tool to dump all objects and their properties from a BACnet/IP device.
 //
 // Usage:
 //   bacnet-dump <host[:port]> [<device-id>] [--filter <wildcard>] [--timeout <ms>]
@@ -106,15 +106,35 @@ client.Start();
 Info($"BACnet/IP dump  target={ip}:{remPort}  filter=\"{filter}\"");
 
 // ─── Device discovery (Who-Is / I-Am) ────────────────────────────────────────
-BacnetAddress? address  = null;
-uint           foundId  = 0;
+//
+//  Two strategies fired in parallel, sharing one signal:
+//
+//    1. Broadcast Who-Is  – works when device is on the same IP subnet
+//    2. Unicast Who-Is    – works across routers / BBMD; requires the target IP
+//
+//  Whichever triggers an I-Am first wins.  If neither succeeds within the
+//  timeout we fall back to the direct address we already constructed (silent
+//  connect – works for many real devices that skip the Who-Is handshake).
+
+// Validate / build the direct unicast address before starting discovery so we
+// can pass it as the unicast Who-Is target too.
+if (!System.Net.IPAddress.TryParse(ip, out _))
+{
+    Error($"'{host}' could not be resolved to a valid IP address.");
+    Error("Try: bacnet-dump --help");
+    client.Dispose();
+    return 1;
+}
+var directAddress = new BacnetAddress(BacnetAddressTypes.IP, $"{ip}:{remPort}");
+
+BacnetAddress? address = null;
+uint           foundId = 0;
 
 using (var signal = new ManualResetEventSlim(false))
 {
     void OnIam(BacnetClient _, BacnetAddress adr, uint id,
                uint maxApdu, BacnetSegmentations seg, ushort vendor)
     {
-        // Accept any device or the specific requested one
         if (deviceId.HasValue && id != deviceId.Value) return;
         if (address != null) return;   // take first match
         address = adr;
@@ -123,24 +143,24 @@ using (var signal = new ManualResetEventSlim(false))
     }
 
     client.OnIam += OnIam;
-    client.WhoIs();
+
+    // 1. Broadcast (same subnet)
+    client.WhoIs(-1, -1, null, null);
+
+    // 2. Unicast (across routers / when broadcast is blocked)
+    //    lowLimit/highLimit of -1 means "any device" in the ela-compil library.
+    client.WhoIs(-1, -1, directAddress, null);
+
     signal.Wait(whoIsMs);
     client.OnIam -= OnIam;
 }
 
 if (address == null)
 {
-    // Fallback: construct address directly from IP:port (works for unicast).
-    // BacnetAddress throws if ip is not a valid dotted-decimal address,
-    // so we validate here and give a clean error message.
-    if (!System.Net.IPAddress.TryParse(ip, out _))
-    {
-        Error($"'{host}' could not be resolved to a valid IP address.");
-        Error("Try: bacnet-dump --help");
-        client.Dispose();
-        return 1;
-    }
-    address = new BacnetAddress(BacnetAddressTypes.IP, $"{ip}:{remPort}");
+    // No I-Am received.  Use the direct address we built above.
+    // Many real devices skip Who-Is/I-Am entirely and just answer
+    // ReadProperty straight away, so this is a normal code path.
+    address = directAddress;
     foundId = deviceId ?? 0;
     Warn("No I-Am received – using direct-address fallback.");
     if (foundId == 0)
@@ -153,6 +173,7 @@ if (address == null)
         return 1;
     }
 }
+
 
 Info($"Device found: id={foundId}  address={address}");
 
