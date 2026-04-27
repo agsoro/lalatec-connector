@@ -28,6 +28,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Threading;
+using System.Text.Encodings.Web;
 
 
 
@@ -37,6 +38,8 @@ using System.Threading;
 // by name, so we cast from the numeric value (matches BACnet spec clause 12).
 const BacnetPropertyIds PROP_STRUCTURED_OBJECT_LIST = (BacnetPropertyIds)209; // on DEVICE
 const BacnetPropertyIds PROP_SUBORDINATE_LIST        = (BacnetPropertyIds)355; // on STRUCTURED_VIEW
+
+string? outFile = null;
 
 // ─── Parse arguments ─────────────────────────────────────────────────────────
 
@@ -74,6 +77,9 @@ for (int i = 1; i < args.Length; i++)
         case "--json":      jsonOutput    = true; break;
         case "--sim-json":  simJsonOutput = true; break;
         case "--all-props": allProps      = true; break;
+        case "--out" when i + 1 < args.Length:
+        case "-o"    when i + 1 < args.Length:
+            outFile = args[++i]; break;
 
         default:
             if (uint.TryParse(args[i], out uint id))
@@ -304,12 +310,23 @@ if (simJsonOutput)
     }
 }
 
+string output;
 if (simJsonOutput)
-    DumpSimJson(client, address, objects, propsToRead, foundId);
+    output = DumpSimJson(client, address, objects, propsToRead, foundId);
 else if (jsonOutput)
-    DumpJson(client, address, objects, propsToRead);
+    output = DumpJson(client, address, objects, propsToRead);
 else
-    DumpTable(client, address, objects, propsToRead);
+    output = RenderTable(client, address, objects, propsToRead);
+
+if (outFile != null)
+{
+    File.WriteAllText(outFile, output, new UTF8Encoding(false));
+    Info($"Output saved to {outFile}");
+}
+else
+{
+    Console.WriteLine(output);
+}
 
     Info($"Done. Objects dumped: {objects.Count}");
 
@@ -337,19 +354,19 @@ return 0;
 //  Output renderers
 // ═══════════════════════════════════════════════════════════════════════════════
 
-static void DumpTable(
+static string RenderTable(
     BacnetClient client, BacnetAddress address,
     List<(BacnetObjectId Id, string Name, string Description)> objects,
     BacnetPropertyIds[] props)
 {
+    var sb = new StringBuilder();
+
     foreach (var (oid, name, desc) in objects)
     {
-        Console.ForegroundColor = ConsoleColor.Cyan;
-        Console.WriteLine($"┌─ {oid}");
-        Console.ResetColor();
-        Console.WriteLine($"│  Name        : {name}");
+        sb.AppendLine($"┌─ {oid}");
+        sb.AppendLine($"│  Name        : {name}");
         if (!string.IsNullOrWhiteSpace(desc))
-            Console.WriteLine($"│  Description : {desc}");
+            sb.AppendLine($"│  Description : {desc}");
 
         var values = ReadAllProperties(client, address, oid, props);
 
@@ -369,20 +386,17 @@ static void DumpTable(
         {
             if (skipIds.Contains(propId)) continue;
             string val = FormatValues(rawValues);
-            Console.WriteLine($"│  {propId,-38}: {val}");
+            sb.AppendLine($"│  {propId,-38}: {val}");
             shown++;
         }
 
         // ── Deziko hierarchy block ────────────────────────────────────────────
-        // PROP_STRUCTURED_OBJECT_LIST (209) on DEVICE → hierarchy roots
         if (oid.type == BacnetObjectTypes.OBJECT_DEVICE
             && values.TryGetValue(PROP_STRUCTURED_OBJECT_LIST, out var svRoots))
         {
-            Console.ForegroundColor = ConsoleColor.Magenta;
-            Console.WriteLine($"│  [Deziko] PROP_STRUCTURED_OBJECT_LIST (209) – hierarchy root(s):");
-            Console.ResetColor();
+            sb.AppendLine($"│  [Deziko] PROP_STRUCTURED_OBJECT_LIST (209) – hierarchy root(s):");
             foreach (var sv in svRoots)
-                Console.WriteLine($"│      {sv.Value}");
+                sb.AppendLine($"│      {sv.Value}");
             shown++;
         }
 
@@ -390,28 +404,25 @@ static void DumpTable(
         if (oid.type == BacnetObjectTypes.OBJECT_STRUCTURED_VIEW
             && values.TryGetValue(PROP_SUBORDINATE_LIST, out var children))
         {
-            Console.ForegroundColor = ConsoleColor.Magenta;
-            Console.WriteLine($"│  [Deziko] PROP_SUBORDINATE_LIST (355) – children:");
-            Console.ResetColor();
+            sb.AppendLine($"│  [Deziko] PROP_SUBORDINATE_LIST (355) – children:");
             foreach (var ch in children)
-                Console.WriteLine($"│      {ch.Value}");
+                sb.AppendLine($"│      {ch.Value}");
             shown++;
         }
 
         if (shown == 0)
-            Console.WriteLine("│  (no properties readable)");
+            sb.AppendLine("│  (no properties readable)");
 
-        Console.ForegroundColor = ConsoleColor.DarkGray;
-        Console.WriteLine($"└{'─',60}");
-        Console.ResetColor();
-        Console.WriteLine();
+        sb.AppendLine($"└{'─',60}");
+        sb.AppendLine();
     }
+    return sb.ToString();
 }
 
-static void DumpJson(
+static string DumpJson(
     BacnetClient client, BacnetAddress address,
     List<(BacnetObjectId Id, string Name, string Description)> objects,
-    BacnetPropertyIds[] props)
+    BacnetPropertyIds[] propIds)
 {
     var root = new List<Dictionary<string, object>>();
 
@@ -428,7 +439,7 @@ static void DumpJson(
             entry["description"] = desc;
 
         var propMap = new Dictionary<string, string>();
-        var values  = ReadAllProperties(client, address, oid, props);
+        var values  = ReadAllProperties(client, address, oid, propIds);
         foreach (var (propId, rawValues) in values.OrderBy(kv => (uint)kv.Key))
             propMap[propId.ToString()] = FormatValues(rawValues);
 
@@ -451,15 +462,18 @@ static void DumpJson(
         root.Add(entry);
     }
 
-    var opts = new JsonSerializerOptions { WriteIndented = true };
-    Console.WriteLine(JsonSerializer.Serialize(root, opts));
+    var opts = new JsonSerializerOptions { 
+        WriteIndented = true,
+        Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+    };
+    return JsonSerializer.Serialize(root, opts);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
 //  Simulator JSON renderer  (--sim-json / bacnet-sim input)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-static void DumpSimJson(
+static string DumpSimJson(
     BacnetClient client, BacnetAddress address,
     List<(BacnetObjectId Id, string Name, string Description)> objects,
     BacnetPropertyIds[] props,
@@ -490,8 +504,11 @@ static void DumpSimJson(
         }).ToList()
     };
 
-    var opts = new JsonSerializerOptions { WriteIndented = true };
-    Console.WriteLine(JsonSerializer.Serialize(simData, opts));
+    var opts = new JsonSerializerOptions { 
+        WriteIndented = true,
+        Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+    };
+    return JsonSerializer.Serialize(simData, opts);
 }
 
 static object? SerializeValueForSim(BacnetValue v)
@@ -557,8 +574,11 @@ static List<BacnetObjectId> ReadObjectList(
     }
     catch (Exception ex)
     {
-        Warn($"Bulk PROP_OBJECT_LIST read failed ({ex.Message}) – switching to indexed fallback…");
-        AnomalyTracker.Track($"Object list bulk read failed: {ex.Message}");
+        if (!ex.Message.Contains("SEGMENTATION_NOT_SUPPORTED"))
+        {
+            Warn($"Bulk PROP_OBJECT_LIST read failed ({ex.Message}) – switching to indexed fallback…");
+            AnomalyTracker.Track($"Object list bulk read failed: {ex.Message}");
+        }
     }
 
     // Indexed fallback: read count at array index 0, then each entry by 1-based index.
@@ -684,7 +704,8 @@ static Dictionary<BacnetPropertyIds, IList<BacnetValue>> ReadAllProperties(
         }
         catch (Exception ex)
         {
-            AnomalyTracker.Track($"RPM chunk failed on {oid}: {ex.Message}");
+            if (!ex.Message.Contains("SEGMENTATION_NOT_SUPPORTED"))
+                AnomalyTracker.Track($"RPM chunk failed on {oid}: {ex.Message}");
             chunkSuccess = false; 
         }
 
@@ -852,7 +873,7 @@ Options:
   --json                Output as pretty-printed JSON instead of a table
   --sim-json            Output as structured JSON (bacnet-sim device.json format)
                         Always includes the DEVICE object regardless of --filter.
-                        Redirect to file: bacnet-dump ... --sim-json > device.json
+  --out, -o <file>      Write output directly to a file in UTF-8 (no redirection needed)
   --all-props           Try every known BACnet property identifier (slow!)
   -h, --help            Show this help
 
