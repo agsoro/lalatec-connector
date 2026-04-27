@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>BacnetSim</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- Same BACnet stack as the connector (ela-compil / YABE) -->
+    <PackageReference Include="BACnet" Version="3.0.2" />
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include="device.xml">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+</Project>

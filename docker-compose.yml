@@ -1,0 +1,96 @@
+# docker-compose.yml  (repo root)
+#
+# Full end-to-end test stack:
+#
+#   1. thingsboard      – ThingsBoard CE (Postgres edition)
+#                         UI  → http://localhost:8080
+#                         MQTT→ localhost:1883
+#                         Logins:
+#                           System admin  sysadmin@thingsboard.org / sysadmin
+#                           Tenant admin  tenant@thingsboard.org   / tenant
+#
+#   2. lalatec-connector – built from connector/, pre-configured with
+#                          credentials for the test simulators below.
+#
+#   3. modbus-sim        – Janitza-style Modbus TCP server (port 502)
+#                          Slave 1: drifting power, accumulating energy.
+#
+#   4. bacnet-sim        – Siemens Desigo-style BACnet/IP device (port 47808 UDP)
+#                          Device 1001 with analog, binary, multi-state objects.
+#                          Full COV subscribe / notify support.
+#
+# Quick start:
+#   docker compose up --build
+#
+# ThingsBoard needs ~60-90 s on first boot to initialise its database.
+# The connector keeps restarting until TB is healthy.
+
+services:
+
+  # ── ThingsBoard CE ─────────────────────────────────────────────────────────
+  thingsboard:
+    image: thingsboard/tb-postgres:latest
+    container_name: thingsboard
+    restart: unless-stopped
+    ports:
+      - "8080:9090"     # HTTP UI  (internal port 9090)
+      - "1883:1883"     # MQTT
+      - "7070:7070"     # Edge RPC (optional)
+      - "5683:5683/udp" # CoAP    (optional)
+    environment:
+      TB_QUEUE_TYPE:     in-memory
+      TB_ADMIN_EMAIL:    sysadmin@thingsboard.org
+      TB_ADMIN_PASSWORD: sysadmin
+    volumes:
+      - tb-data:/data
+      - tb-logs:/var/log/thingsboard
+    healthcheck:
+      # Simple TCP-port check – works regardless of whether curl is in the image.
+      # Passes as soon as ThingsBoard's HTTP port is accepting connections.
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/9090' 2>/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+      start_period: 60s
+
+  # ── Modbus TCP simulator ────────────────────────────────────────────────────
+  modbus-sim:
+    build:
+      context: testing/modbus-sim
+    container_name: modbus-sim
+    restart: unless-stopped
+    ports:
+      - "502:502"       # expose for local debug with Modscan / QModMaster
+
+  # ── BACnet/IP simulator ─────────────────────────────────────────────────────
+  bacnet-sim:
+    build:
+      context: testing/bacnet-sim
+    container_name: bacnet-sim
+    restart: unless-stopped
+    ports:
+      - "47808:47808/udp"  # expose for external BACnet tools / debugging
+
+  # ── lalatec-connector ───────────────────────────────────────────────────────
+  lalatec-connector:
+    build:
+      context: connector           # source root (Connector.csproj lives here)
+      dockerfile: docker/Dockerfile
+    container_name: lalatec-connector
+    restart: unless-stopped
+    depends_on:
+      thingsboard:
+        condition: service_healthy
+      modbus-sim:
+        condition: service_started
+      bacnet-sim:
+        condition: service_started
+    volumes:
+      # Mount the test-ready config into /app/connector.json
+      - ./connector/docker/connector.compose.json:/app/connector.json:ro
+    # All services share the default compose bridge network.
+    # "thingsboard", "modbus-sim", and "bacnet-sim" resolve via Docker DNS.
+
+volumes:
+  tb-data:
+  tb-logs:

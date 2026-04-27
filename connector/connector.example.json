@@ -49,24 +49,28 @@
 
     // ── Janitza energy meter ──────────────────────────────────────────────────
     {
-      "name":         "Main Meter Building A",
-      "deviceType":   "janitza",
-      "connectionId": "modbus-building-a",
-      "slaveId":      1
+      "name":                "Main Meter Building A",
+      "deviceType":          "janitza",
+      "connectionId":        "modbus-building-a",
+      "slaveId":             1,
+      // Override the global polling interval for this device (optional).
+      "pollIntervalSeconds": 30
     },
     {
-      "name":         "Sub Meter Floor 2",
-      "deviceType":   "janitza",
-      "connectionId": "modbus-building-b",
-      "slaveId":      1
+      "name":                "Sub Meter Floor 2",
+      "deviceType":          "janitza",
+      "connectionId":        "modbus-building-b",
+      "slaveId":             1,
+      "pollIntervalSeconds": 30
     },
 
     // ── Glück controller ──────────────────────────────────────────────────────
     {
-      "name":         "Glueck Controller Zone 1",
-      "deviceType":   "glueck",
-      "connectionId": "modbus-building-a",
-      "slaveId":      3,
+      "name":                "Glueck Controller Zone 1",
+      "deviceType":          "glueck",
+      "connectionId":        "modbus-building-a",
+      "slaveId":             3,
+      "pollIntervalSeconds": 30,
 
       // ── Writable registers ─────────────────────────────────────────────────
       // Each entry maps a ThingsBoard key to a Modbus holding register (or coil).
@@ -89,12 +93,17 @@
       }
     },
 
-    // ── BACnet/IP device ──────────────────────────────────────────────────────
+    // ── BACnet/IP device with COV subscriptions ───────────────────────────────
     {
-      "name":           "HVAC Controller AHU-01",
-      "deviceType":     "bacnet-generic",
-      "connectionId":   "bacnet-hvac",
-      "bacnetDeviceId": 1001,
+      "name":                "HVAC Controller AHU-01",
+      "deviceType":          "bacnet-generic",
+      "connectionId":        "bacnet-hvac",
+      "bacnetDeviceId":      1001,
+
+      // Per-device fallback poll interval.
+      // For COV devices this controls how often fallback-polled objects are read.
+      // For non-COV BACnet devices this is the regular poll interval.
+      "pollIntervalSeconds": 30,
 
       "bacnet": {
 
@@ -167,6 +176,33 @@
 
           // Repeat discovery every N minutes. 0 = never refresh.
           "refreshIntervalMinutes": 60
+        },
+
+        // ── Desigo Structured View hierarchy (opt-in) ──────────────────────
+        "hierarchy": {
+          "enabled":   true,
+          "assetType": "BACnet Node"
+        },
+
+        // ── Change-of-Value subscriptions (opt-in) ─────────────────────────
+        // When enabled the connector maintains a long-lived BACnet client and
+        // receives push notifications from the device instead of polling.
+        //
+        //   enabled                 – set to true to activate COV for this device.
+        //   lifetimeSeconds         – subscription TTL sent to the device (300 s default).
+        //                             Subscriptions are auto-renewed 30 s before expiry.
+        //   covIncrement            – min value change to trigger a notification (0 = any).
+        //   confirmedNotifications  – true = device sends ACK-required notifications.
+        //   attributePollRatePerMinute – how many attribute reads/min to drip-poll across
+        //                             all objects (round-robin). 5 = 1 read every 12 s.
+        //                             Attributes (PROP_UNITS, PROP_DESCRIPTION …) are read
+        //                             continuously and pushed to ThingsBoard attributes.
+        "cov": {
+          "enabled":                  true,
+          "lifetimeSeconds":          300,
+          "covIncrement":             0.0,
+          "confirmedNotifications":   false,
+          "attributePollRatePerMinute": 5
         }
       },
 

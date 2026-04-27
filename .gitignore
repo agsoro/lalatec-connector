@@ -34,8 +34,9 @@ project.fragment.lock.json
 Thumbs.db
 desktop.ini
 
-# Runtime config (contains credentials – never commit)
-connector.json
+# Runtime configs (contain credentials – never commit)
+connector/connector.json
+connector/docker/connector.compose.json
 
 # Logs
 *.log

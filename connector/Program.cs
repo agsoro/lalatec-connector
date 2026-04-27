@@ -123,24 +123,136 @@ namespace Connector
                 }
             }
 
-            // ── Polling loop ──────────────────────────────────────────────────
-            int intervalMs = cfg.Polling.IntervalSeconds * 1000;
-            Console.WriteLine($"\n► Polling every {cfg.Polling.IntervalSeconds} s. Ctrl+C to stop.\n");
+            // ── Hierarchy background provisioning (Desigo Structured Views) ─────
+            // Fires once after startup as a background Task for each BACnet device
+            // that has hierarchy.enabled = true.  It waits for the first discovery
+            // (signalled by BacnetReadResult.HierarchyDirty) then provisions assets.
+            var bacnetReader = (BacnetReader)DeviceReaderFactory.Get("bacnet-generic");
+
+            // Per-device leaf asset maps (keyPrefix → TB asset UUID)
+            // Populated by the background hierarchy provisioner after discovery; the
+            // poll loop reads this (under lock) to route telemetry to individual assets.
+            var leafMaps = new Dictionary<string, Dictionary<string, string>>();
+
+            foreach (var d in cfg.Devices)
+            {
+                if (d.Bacnet?.Hierarchy?.Enabled != true) continue;
+
+                var capturedDevice = d;
+                var capturedConn   = connections[d.ConnectionId];
+                _ = Task.Run(async () =>
+                {
+                    Console.WriteLine(
+                        $"  [Hierarchy] Background job started for '{capturedDevice.Name}'.");
+                    try
+                    {
+                        // Wait until the first ReadFull() sets HierarchyDirty, which
+                        // happens on the first poll cycle.  Poll every 5 s here.
+                        DesigoTree? tree = null;
+                        while (!cts.Token.IsCancellationRequested)
+                        {
+                            tree = bacnetReader.GetDiscoveredTree(capturedDevice.Name);
+                            if (tree is not null) break;
+                            await Task.Delay(5_000, cts.Token);
+                        }
+
+                        if (tree is null || cts.Token.IsCancellationRequested) return;
+
+                        // Refresh JWT in case it expired while waiting for discovery
+                        await tbApi.RefreshIfNeededAsync();
+
+                        // Look up the TB Device UUID for this BACnet device
+                        string? tbDeviceId = await tbApi.FindDeviceIdAsync(capturedDevice.Name);
+                        if (tbDeviceId is null)
+                        {
+                            Console.Error.WriteLine(
+                                $"  [Hierarchy] ERROR: TB device '{capturedDevice.Name}' not found in ThingsBoard. " +
+                                "Ensure the device was provisioned before the hierarchy job runs.");
+                            return;
+                        }
+
+                        Console.WriteLine(
+                            $"  [Hierarchy] Provisioning asset tree for '{capturedDevice.Name}' " +
+                            $"(device UUID={tbDeviceId}, roots={tree.Roots.Count})…");
+                        var provisioner = new DesigoProvisioner();
+                        var leafMap = await provisioner.ProvisionAsync(
+                            tree, tbApi, tbDeviceId,
+                            capturedDevice.Bacnet!.Hierarchy!.AssetType,
+                            cts.Token);
+
+                        // Store the leaf map so the poll loop can route telemetry to assets
+                        lock (leafMaps)
+                            leafMaps[capturedDevice.Name] = leafMap;
+                        Console.WriteLine(
+                            $"  [Hierarchy] Leaf map: {leafMap.Count} data-point assets registered for telemetry routing.");
+                    }
+                    catch (OperationCanceledException) { /* shutting down */ }
+                    catch (Exception ex)
+                    {
+                        Console.Error.WriteLine(
+                            $"  [Hierarchy] ERROR '{capturedDevice.Name}': {ex.GetType().Name}: {ex.Message}");
+                        if (ex.InnerException is not null)
+                            Console.Error.WriteLine(
+                                $"  [Hierarchy]   Inner: {ex.InnerException.Message}");
+                    }
+                }, cts.Token);
+            }
+
+            // ── Per-device poll-interval tracking ─────────────────────────────
+            var lastPolledAt = new Dictionary<DeviceConfig, DateTime>();
+            foreach (var d in cfg.Devices)
+                lastPolledAt[d] = DateTime.MinValue;
+
+            int globalIntervalMs = cfg.Polling.IntervalSeconds * 1000;
+
+            // ── COV init: set up long-lived clients for COV-enabled BACnet devices ──
+            foreach (var d in cfg.Devices)
+            {
+                if (d.Bacnet?.Cov is not { Enabled: true }) continue;
+
+                var capturedDevice = d;
+                var capturedConn   = connections[d.ConnectionId];
+                var capturedMqtt   = mqttClients[d];
+
+                Console.WriteLine($"  [COV] Initialising COV mode for '{d.Name}'…");
+                bacnetReader.InitCovMode(
+                    capturedConn,
+                    capturedDevice,
+                    tel  => PublishTelemetryAsync(capturedMqtt, tel),
+                    attr => PublishAttributesAsync(capturedMqtt, attr));
+
+                // COV devices don't need the polling loop to read their values;
+                // set LastPolledAt so ServiceCovDevice runs every tick.
+                lastPolledAt[d] = DateTime.UtcNow;
+            }
+
+            // ── Polling loop (1 s tick) ───────────────────────────────────────
+            Console.WriteLine($"\n► Running. Ctrl+C to stop.\n");
 
             while (!cts.Token.IsCancellationRequested)
             {
                 var tasks = cfg.Devices
-                    .Select(d => PollAndPublishAsync(d, connections[d.ConnectionId], mqttClients[d]))
+                    .Select(d => PollAndPublishAsync(
+                        d, connections[d.ConnectionId], mqttClients[d],
+                        lastPolledAt,
+                        d.PollIntervalSeconds.HasValue
+                            ? d.PollIntervalSeconds.Value * 1000
+                            : globalIntervalMs,
+                        tbApi, leafMaps))
                     .ToList();
 
                 await Task.WhenAll(tasks);
                 await tbApi.RefreshIfNeededAsync();
 
-                try { await Task.Delay(intervalMs, cts.Token); }
+                try { await Task.Delay(1_000, cts.Token); }
                 catch (TaskCanceledException) { break; }
             }
 
             Console.WriteLine("\nShutting down…");
+            // Gracefully cancel COV subscriptions
+            foreach (var d in cfg.Devices)
+                if (d.Bacnet?.Cov is { Enabled: true })
+                    bacnetReader.DisposeCovClient(d.Name);
             foreach (var c in mqttClients.Values)
                 await c.StopAsync();
         }
@@ -149,7 +261,11 @@ namespace Connector
         //  Poll one device
         // =====================================================================
         static async Task PollAndPublishAsync(
-            DeviceConfig device, ConnectionConfig conn, IManagedMqttClient mqtt)
+            DeviceConfig device, ConnectionConfig conn, IManagedMqttClient mqtt,
+            Dictionary<DeviceConfig, DateTime> lastPolledAt,
+            int deviceIntervalMs,
+            ThingsBoardApi tbApi,
+            Dictionary<string, Dictionary<string, string>> leafMaps)
         {
             try
             {
@@ -158,10 +274,41 @@ namespace Connector
                 Telemetry  telemetry;
                 Attributes attributes = new();
 
-                // BACnet returns both telemetry and attributes
-                if (reader is BacnetReader bacnetReader)
+                // ── BACnet COV mode ───────────────────────────────────────────
+                if (reader is BacnetReader bacnetReader && device.Bacnet?.Cov is { Enabled: true })
                 {
-                    var result = bacnetReader.ReadFull(conn, device);
+                    // ServiceCovDevice runs every tick: renews subs, drip-polls attrs,
+                    // reads fallback-polled objects. COV telemetry is published
+                    // event-driven directly from the OnCOVNotification handler.
+                    var result = bacnetReader.ServiceCovDevice(conn, device);
+                    attributes = result.Attributes;
+                    telemetry  = result.Telemetry;  // fallback-poll objects only
+
+                    if (attributes.Count > 0)
+                        await PublishAttributesAsync(mqtt, attributes);
+                    if (telemetry.Count > 0)
+                        await PublishTelemetryAsync(mqtt, telemetry);
+
+                    // Route telemetry to individual leaf assets via REST
+                    await PostAssetTelemetryAsync(device.Name, telemetry, tbApi, leafMaps);
+
+                    if (attributes.Count > 0 || telemetry.Count > 0)
+                        Console.WriteLine(
+                            $"[{DateTime.Now:HH:mm:ss}] [{reader.DriverName,-10}] {device.Name,-38} " +
+                            $"[COV] attrs={attributes.Count} fallback-tel={telemetry.Count}");
+                    return;
+                }
+
+                // ── Polling mode (non-COV BACnet / Modbus) ────────────────────
+                var now = DateTime.UtcNow;
+                if (now - lastPolledAt[device] < TimeSpan.FromMilliseconds(deviceIntervalMs))
+                    return;   // not yet time for this device
+
+                lastPolledAt[device] = now;
+
+                if (reader is BacnetReader br)
+                {
+                    var result = br.ReadFull(conn, device);
                     telemetry  = result.Telemetry;
                     attributes = result.Attributes;
                 }
@@ -170,15 +317,15 @@ namespace Connector
                     telemetry = reader.Read(conn, device);
                 }
 
-                // Publish telemetry (time-series)
                 if (telemetry.Count > 0)
                     await PublishTelemetryAsync(mqtt, telemetry);
 
-                // Publish attributes (only when non-empty, typically only after discovery)
+                // Route telemetry to individual leaf assets via REST
+                await PostAssetTelemetryAsync(device.Name, telemetry, tbApi, leafMaps);
+
                 if (attributes.Count > 0)
                     await PublishAttributesAsync(mqtt, attributes);
 
-                // Log
                 string tvLine = string.Join("  ", telemetry.Select(kv => $"{kv.Key}={kv.Value}"));
                 Console.WriteLine(
                     $"[{DateTime.Now:HH:mm:ss}] [{reader.DriverName,-10}] {device.Name,-38} " +
@@ -194,6 +341,62 @@ namespace Connector
             {
                 Console.Error.WriteLine(
                     $"[{DateTime.Now:HH:mm:ss}] ERROR [{device.DeviceType}] {device.Name}: {ex.Message}");
+            }
+        }
+
+        // =====================================================================
+        //  Asset telemetry routing (REST)
+        // =====================================================================
+
+        /// <summary>
+        /// For each telemetry key, extracts the key-prefix (e.g. "ai_1" from
+        /// "ai_1_object_analog_input_1_value"), looks it up in the device's leafMap,
+        /// and posts the value to the matching asset via the ThingsBoard REST API.
+        /// Keys that have no matching asset (e.g. Modbus devices) are silently skipped.
+        /// </summary>
+        static async Task PostAssetTelemetryAsync(
+            string deviceName,
+            Telemetry telemetry,
+            ThingsBoardApi tbApi,
+            Dictionary<string, Dictionary<string, string>> leafMaps)
+        {
+            if (telemetry.Count == 0) return;
+
+            Dictionary<string, string>? leafMap;
+            lock (leafMaps)
+            {
+                if (!leafMaps.TryGetValue(deviceName, out leafMap) || leafMap.Count == 0)
+                    return;
+            }
+
+            // Group values by assetId for batched POSTing
+            var byAsset = new Dictionary<string, Dictionary<string, double>>();
+
+            foreach (var kv in telemetry)
+            {
+                // Key format: "{prefix}_{...}_value"  e.g. "ai_1_object_analog_input_1_value"
+                // prefix = first two underscore-delimited tokens: type alias + instance
+                var parts = kv.Key.Split('_');
+                if (parts.Length < 2) continue;
+                string prefix = $"{parts[0]}_{parts[1]}";
+
+                if (!leafMap.TryGetValue(prefix, out var assetId)) continue;
+
+                if (!byAsset.TryGetValue(assetId, out var bucket))
+                    byAsset[assetId] = bucket = new Dictionary<string, double>();
+
+                // Publish as "value" (short canonical key) on the asset itself
+                bucket["value"] = Convert.ToDouble(kv.Value);
+            }
+
+            foreach (var (assetId, vals) in byAsset)
+            {
+                try   { await tbApi.PostAssetTelemetryBatchAsync(assetId, vals); }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine(
+                        $"  [TB] WARN: asset telemetry failed for {assetId}: {ex.Message}");
+                }
             }
         }
 
@@ -341,7 +544,7 @@ namespace Connector
                 .WithClientOptions(new MqttClientOptionsBuilder()
                     .WithTcpServer(tb.Host, tb.MqttPort)
                     .WithCredentials(d.AccessToken, "")
-                    .WithClientId($"conn-{d.AccessToken[^10..]}-{Guid.NewGuid():N[..4]}")
+                    .WithClientId($"conn-{d.AccessToken[^10..]}-{Guid.NewGuid().ToString("N")[..4]}")
                     .WithCleanSession()
                     .Build())
                 .Build();

@@ -94,7 +94,14 @@ namespace Connector
 
         // Write-back (optional – both drivers)
         [property: JsonPropertyName("writeback")]          WritebackConfig?              Writeback,
-        [property: JsonPropertyName("writableRegisters")]  List<ModbusWritableRegister>? WritableRegisters
+        [property: JsonPropertyName("writableRegisters")]  List<ModbusWritableRegister>? WritableRegisters,
+
+        /// <summary>
+        /// Per-device poll interval in seconds. Overrides the global polling.intervalSeconds.
+        /// Controls how often non-COV / fallback-polled values are read from the device.
+        /// When omitted, the global default is used.
+        /// </summary>
+        [property: JsonPropertyName("pollIntervalSeconds")] int? PollIntervalSeconds = null
     )
     {
         public string AccessToken =>
@@ -107,10 +114,68 @@ namespace Connector
     // ── BACnet-specific device config ──────────────────────────────────────────
 
     record BacnetDeviceConfig(
-        [property: JsonPropertyName("whoIsTimeoutMs")] int                WhoIsTimeoutMs,
-        [property: JsonPropertyName("filter")]         BacnetFilterConfig Filter,
-        [property: JsonPropertyName("properties")]     BacnetPropsConfig  Properties,
-        [property: JsonPropertyName("discovery")]      BacnetDiscoveryConfig Discovery
+        [property: JsonPropertyName("whoIsTimeoutMs")] int                    WhoIsTimeoutMs,
+        [property: JsonPropertyName("filter")]         BacnetFilterConfig     Filter,
+        [property: JsonPropertyName("properties")]     BacnetPropsConfig      Properties,
+        [property: JsonPropertyName("discovery")]      BacnetDiscoveryConfig  Discovery,
+
+        /// <summary>
+        /// Optional Desigo / Structured-View hierarchy extraction.
+        /// Enabled only when this block is present and <c>enabled</c> is true.
+        /// </summary>
+        [property: JsonPropertyName("hierarchy")]      BacnetHierarchyConfig? Hierarchy = null,
+
+        /// <summary>
+        /// Optional BACnet Change-of-Value subscription config.
+        /// When enabled the connector subscribes to COV notifications from the device
+        /// instead of polling PROP_PRESENT_VALUE on every cycle.
+        /// </summary>
+        [property: JsonPropertyName("cov")]            BacnetCovConfig?       Cov = null
+    );
+
+    // ── BACnet COV subscription config ────────────────────────────────────────
+
+    /// <summary>
+    /// Configures BACnet Change-of-Value subscriptions for a device.
+    /// When <see cref="Enabled"/> is true the connector maintains a long-lived
+    /// BACnet client and receives push notifications instead of polling telemetry.
+    /// </summary>
+    record BacnetCovConfig(
+        /// <summary>Activate COV for this device. False = unchanged polling behaviour.</summary>
+        [property: JsonPropertyName("enabled")]                   bool  Enabled,
+
+        /// <summary>Subscription lifetime sent to the device in seconds (default 300).</summary>
+        [property: JsonPropertyName("lifetimeSeconds")]           uint  LifetimeSeconds = 300,
+
+        /// <summary>Minimum value change to trigger a notification (0 = any change).</summary>
+        [property: JsonPropertyName("covIncrement")]              float CovIncrement = 0f,
+
+        /// <summary>True = device sends ConfirmedCOVNotification (requires ACK); false = unconfirmed.</summary>
+        [property: JsonPropertyName("confirmedNotifications")]    bool  ConfirmedNotifications = false,
+
+        /// <summary>
+        /// How many attribute property reads to perform per minute across all objects.
+        /// Attributes (PROP_UNITS, PROP_DESCRIPTION, …) are drip-polled continuously
+        /// in a round-robin at this rate. Default: 5 reads/min.
+        /// </summary>
+        [property: JsonPropertyName("attributePollRatePerMinute")] int  AttributePollRatePerMinute = 5
+    );
+
+    // ── Desigo hierarchy config ────────────────────────────────────────────────
+
+    /// <summary>
+    /// Controls whether the connector walks OBJECT_STRUCTURED_VIEW objects on the
+    /// BACnet device and materialises them as ThingsBoard Assets with "Contains" relations.
+    /// </summary>
+    record BacnetHierarchyConfig(
+        /// <summary>Set to true to enable Structured View extraction for this device.</summary>
+        [property: JsonPropertyName("enabled")]   bool   Enabled,
+
+        /// <summary>
+        /// ThingsBoard asset type string used when creating asset entities.
+        /// Defaults to "BACnet Node" when omitted.
+        /// </summary>
+        [property: JsonPropertyName("assetType")] string AssetType = "BACnet Node"
     );
 
     /// <summary>

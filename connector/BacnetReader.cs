@@ -35,8 +35,10 @@ namespace Connector
     // =========================================================================
     class BacnetReadResult
     {
-        public Telemetry  Telemetry  { get; } = new();
-        public Attributes Attributes { get; } = new();
+        public Telemetry  Telemetry     { get; } = new();
+        public Attributes Attributes   { get; } = new();
+        /// <summary>True on the first poll after a (re-)discovery. Signals the background job to re-provision the hierarchy.</summary>
+        public bool       HierarchyDirty { get; set; }
     }
 
     // =========================================================================
@@ -72,6 +74,11 @@ namespace Connector
         static string Sanitise(string name) =>
             Regex.Replace(name.ToLowerInvariant().Trim(), @"[^a-z0-9]+", "_").Trim('_');
     }
+
+    // =========================================================================
+    //  COV value snapshot – stored when a COV notification arrives
+    // =========================================================================
+    record CovSnapshot(double Value, DateTime ReceivedAt);
 
     // =========================================================================
     //  The reader + writer
@@ -127,6 +134,17 @@ namespace Connector
                 state.LastDiscovery    = DateTime.UtcNow;
                 state.DiscoveryDone    = true;
                 state.AttributesSent   = false;   // re-send attributes after rediscovery
+                state.HierarchyDirty   = true;    // signal background provisioner
+
+                // Walk Structured View hierarchy when enabled
+                if (cfg.Hierarchy?.Enabled == true)
+                {
+                    Console.WriteLine($"  [BACnet] Walking Structured Views on {device.Name}…");
+                    state.Tree = BacnetHierarchy.Walk(client, address, device.BacnetDeviceId.Value);
+                    Console.WriteLine($"  [BACnet] Hierarchy walk complete — " +
+                                      $"{state.Tree.Roots.Count} root(s).");
+                }
+
                 Console.WriteLine($"  [BACnet] {device.Name}: {all.Count} objects found, " +
                                   $"{filtered.Count} after filter.");
             }
@@ -174,6 +192,13 @@ namespace Connector
 
             if (!state.AttributesSent && attrPropIds.Length > 0)
                 state.AttributesSent = true;
+
+            // Propagate the dirty flag once per discovery cycle
+            if (state.HierarchyDirty)
+            {
+                result.HierarchyDirty  = true;
+                state.HierarchyDirty   = false;
+            }
 
             return result;
         }
@@ -456,8 +481,27 @@ namespace Connector
         static BacnetAddress ResolveAddress(
             BacnetClient client, string host, int port, uint deviceId, int timeoutMs)
         {
+            // BacnetAddress requires a dotted-decimal IP – resolve hostname if needed
+            // (e.g. "bacnet-sim" on the Docker bridge resolves via Docker DNS).
+            string ip = host;
+            if (!System.Net.IPAddress.TryParse(host, out _))
+            {
+                try
+                {
+                    var addrs = System.Net.Dns.GetHostAddresses(host);
+                    var v4    = addrs.FirstOrDefault(
+                        a => a.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork);
+                    if (v4 != null) ip = v4.ToString();
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine(
+                        $"  [BACnet] DNS resolution failed for '{host}': {ex.Message}");
+                }
+            }
+
             // Build the direct address from config (works for unicast BACnet/IP)
-            var directAddress = new BacnetAddress(BacnetAddressTypes.IP, $"{host}:{port}");
+            var directAddress = new BacnetAddress(BacnetAddressTypes.IP, $"{ip}:{port}");
 
             BacnetAddress? iamAddress = null;
             using var      signal     = new ManualResetEventSlim(false);
@@ -537,10 +581,382 @@ namespace Connector
 
         class DiscoveryState
         {
+            // ── Core discovery ────────────────────────────────────────────────
             public bool                   DiscoveryDone   { get; set; }
-            public bool                   AttributesSent  { get; set; }
+            public bool                   AttributesSent  { get; set; }  // non-COV only
+            public bool                   HierarchyDirty  { get; set; }
             public DateTime               LastDiscovery   { get; set; } = DateTime.MinValue;
             public List<BacnetObjectInfo> CachedObjects   { get; set; } = new();
+            /// <summary>Populated after discovery when hierarchy extraction is enabled.</summary>
+            public DesigoTree?            Tree            { get; set; }
+
+            // ── COV mode ──────────────────────────────────────────────────────
+            /// <summary>Long-lived client kept open for the lifetime of the process (COV mode).</summary>
+            public BacnetClient?          CovClient       { get; set; }
+            public BacnetAddress?         CovAddress      { get; set; }
+
+            /// <summary>Latest value received via COV notification per object.</summary>
+            public Dictionary<BacnetObjectId, CovSnapshot>
+                                          CovValues       { get; set; } = new();
+
+            /// <summary>When each COV subscription expires (we renew 30 s before).</summary>
+            public Dictionary<BacnetObjectId, DateTime>
+                                          CovSubExpiry    { get; set; } = new();
+
+            /// <summary>Objects that returned a NAK to SubscribeCOV – polled the old way.</summary>
+            public HashSet<BacnetObjectId> CovFallbackPoll { get; set; } = new();
+
+            // ── Attribute drip-poll ───────────────────────────────────────────
+            /// <summary>Round-robin cursor across (object × attribute-property) slots.</summary>
+            public int      AttrPollCursor  { get; set; } = 0;
+            /// <summary>Earliest time the next attribute read is permitted.</summary>
+            public DateTime NextAttrPoll    { get; set; } = DateTime.MinValue;
+
+            // ── Async publish callbacks (set by Program.cs for COV devices) ───
+            public Func<Telemetry,  Task>? PublishTelemetry  { get; set; }
+            public Func<Attributes, Task>? PublishAttributes { get; set; }
+        }
+
+        /// <summary>
+        /// Returns the <see cref="DesigoTree"/> produced during the last discovery run for this
+        /// device, or null when no tree has been extracted yet (hierarchy disabled or not yet run).
+        /// </summary>
+        public DesigoTree? GetDiscoveredTree(string deviceName)
+        {
+            lock (_stateLock)
+                return _stateByDevice.TryGetValue(deviceName, out var s) ? s.Tree : null;
+        }
+
+        // =====================================================================
+        //  COV mode – setup, subscription management, service loop
+        // =====================================================================
+
+        /// <summary>
+        /// Initialises COV mode for a device. Called once from Program.cs on startup.
+        /// Creates a long-lived BacnetClient, runs discovery, subscribes COV for all
+        /// discovered objects, and registers the async publish callbacks that are invoked
+        /// whenever a COV notification arrives.
+        /// </summary>
+        public void InitCovMode(
+            ConnectionConfig              conn,
+            DeviceConfig                  device,
+            Func<Telemetry,  Task>        publishTelemetry,
+            Func<Attributes, Task>        publishAttributes)
+        {
+            var cfg    = device.Bacnet!;
+            var state  = GetOrCreateState(device.Name);
+
+            state.PublishTelemetry  = publishTelemetry;
+            state.PublishAttributes = publishAttributes;
+
+            // Long-lived client (one UDP socket per device)
+            state.CovClient  = OpenClient(conn);
+            state.CovAddress = ResolveAddress(
+                state.CovClient, conn.Host, conn.Port,
+                device.BacnetDeviceId!.Value,
+                cfg.WhoIsTimeoutMs > 0 ? cfg.WhoIsTimeoutMs : 2000);
+
+            // Register COV notification handler
+            state.CovClient.OnCOVNotification +=
+                (sender, adr, invokeId, _, _, monitoredObjId, _, needConfirm, values, _) =>
+                {
+                    // ACK confirmed notifications
+                    if (needConfirm)
+                        try { sender.SimpleAckResponse(adr,
+                            BacnetConfirmedServices.SERVICE_CONFIRMED_COV_NOTIFICATION,
+                            invokeId); }
+                        catch { /* best-effort */ }
+
+                    BacnetObjectInfo? objInfo;
+                    lock (_stateLock)
+                        objInfo = state.CachedObjects
+                                       .FirstOrDefault(o => o.ObjectId == monitoredObjId);
+                    if (objInfo is null) return;
+
+                    var tel = new Telemetry();
+                    foreach (var pv in values)
+                    {
+                        var propId = (BacnetPropertyIds)pv.property.propertyIdentifier;
+                        if (pv.value?.Count > 0 && TryToDouble(pv.value[0].Value, out double d))
+                        {
+                            tel[$"{objInfo.KeyPrefix}_{PropSuffix(propId)}"] = Math.Round(d, 4);
+                            lock (_stateLock)
+                                state.CovValues[monitoredObjId] = new CovSnapshot(d, DateTime.UtcNow);
+                        }
+                    }
+
+                    if (tel.Count > 0)
+                        Task.Run(() => publishTelemetry(tel))
+                            .ContinueWith(t => Console.Error.WriteLine(
+                                $"  [COV] Publish failed for {monitoredObjId}: {t.Exception?.GetBaseException().Message}"),
+                                TaskContinuationOptions.OnlyOnFaulted);
+                };
+
+            // Discovery + initial subscriptions
+            RunDiscoveryInternal(state.CovClient, state.CovAddress, device, cfg, state);
+            EnsureCovSubscriptions(state, cfg);
+
+            Console.WriteLine(
+                $"  [COV] {device.Name}: {state.CachedObjects.Count} subscribed, " +
+                $"{state.CovFallbackPoll.Count} fallback-poll.");
+        }
+
+        /// <summary>
+        /// Runs object discovery and caches results into <paramref name="state"/>.
+        /// Shared by InitCovMode and the periodic rediscovery path.
+        /// </summary>
+        void RunDiscoveryInternal(
+            BacnetClient client, BacnetAddress address,
+            DeviceConfig device, BacnetDeviceConfig cfg, DiscoveryState state)
+        {
+            Console.WriteLine($"  [BACnet] Discovering objects on {device.Name}…");
+            var all      = DiscoverObjects(client, address, device.BacnetDeviceId!.Value, cfg);
+            var filtered = ApplyFilter(client, address, all, cfg.Filter);
+
+            lock (_stateLock)
+            {
+                state.CachedObjects  = filtered;
+                state.LastDiscovery  = DateTime.UtcNow;
+                state.DiscoveryDone  = true;
+                state.HierarchyDirty = true;
+            }
+
+            if (cfg.Hierarchy?.Enabled == true)
+            {
+                state.Tree = BacnetHierarchy.Walk(client, address, device.BacnetDeviceId.Value);
+                Console.WriteLine(
+                    $"  [BACnet] Hierarchy walk complete — {state.Tree.Roots.Count} root(s).");
+            }
+
+            Console.WriteLine(
+                $"  [BACnet] {device.Name}: {all.Count} found, {filtered.Count} after filter.");
+        }
+
+        /// <summary>
+        /// Subscribes (or re-subscribes) COV for all objects not yet subscribed or whose
+        /// subscription expires within 30 seconds. Objects that NAK go into
+        /// <see cref="DiscoveryState.CovFallbackPoll"/>.
+        /// </summary>
+        void EnsureCovSubscriptions(DiscoveryState state, BacnetDeviceConfig cfg)
+        {
+            var covCfg = cfg.Cov!;
+            var now    = DateTime.UtcNow;
+            var renew  = now.AddSeconds(30);   // renew anything expiring in next 30 s
+
+            foreach (var obj in state.CachedObjects)
+            {
+                // Skip if subscription still has > 30 s left
+                if (state.CovSubExpiry.TryGetValue(obj.ObjectId, out var exp) && exp > renew)
+                    continue;
+
+                try
+                {
+                    bool ok = state.CovClient!.SubscribeCOVRequest(
+                        state.CovAddress!,
+                        obj.ObjectId,
+                        1u,    // subscribeId
+                        false, // cancel
+                        covCfg.ConfirmedNotifications,
+                        covCfg.LifetimeSeconds,
+                        0);    // maxSegments (0 = unspecified)
+
+                    if (ok)
+                    {
+                        state.CovSubExpiry[obj.ObjectId] =
+                            now.AddSeconds(covCfg.LifetimeSeconds);
+                        state.CovFallbackPoll.Remove(obj.ObjectId);
+
+                        // Seed value cache on first subscription
+                        if (!state.CovValues.ContainsKey(obj.ObjectId))
+                        {
+                            var seed = ReadObjectProperties(
+                                state.CovClient, state.CovAddress!, obj.ObjectId,
+                                new[] { BacnetPropertyIds.PROP_PRESENT_VALUE });
+                            if (seed.TryGetValue(BacnetPropertyIds.PROP_PRESENT_VALUE, out var raw)
+                                && TryToDouble(raw, out double d))
+                                state.CovValues[obj.ObjectId] = new CovSnapshot(d, now);
+                        }
+                    }
+                    else
+                    {
+                        Console.WriteLine($"  [COV] {obj.ObjectName}: fallback-poll (NAK)");
+                        state.CovFallbackPoll.Add(obj.ObjectId);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"  [COV] {obj.ObjectName}: fallback-poll ({ex.Message})");
+                    state.CovFallbackPoll.Add(obj.ObjectId);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Called every fast tick (1 s) for BACnet-COV devices.
+        /// Does NOT publish COV telemetry (that is done event-driven from OnCOVNotification).
+        /// Returns a <see cref="BacnetReadResult"/> containing:
+        ///   • Telemetry for fallback-polled objects (those that could not subscribe COV)
+        ///   • At most one attribute key read by the drip-poller this tick
+        ///   • HierarchyDirty flag propagated as usual
+        /// </summary>
+        public BacnetReadResult ServiceCovDevice(ConnectionConfig conn, DeviceConfig device)
+        {
+            var cfg    = device.Bacnet!;
+            var covCfg = cfg.Cov!;
+            var state  = GetOrCreateState(device.Name);
+            var result = new BacnetReadResult();
+
+            if (!state.DiscoveryDone || state.CovClient is null)
+                return result;
+
+            // Periodic rediscovery
+            if (cfg.Discovery.RefreshIntervalMinutes > 0
+                && DateTime.UtcNow - state.LastDiscovery
+                   > TimeSpan.FromMinutes(cfg.Discovery.RefreshIntervalMinutes))
+            {
+                state.CovAddress = ResolveAddress(
+                    state.CovClient, conn.Host, conn.Port,
+                    device.BacnetDeviceId!.Value,
+                    cfg.WhoIsTimeoutMs > 0 ? cfg.WhoIsTimeoutMs : 2000);
+                RunDiscoveryInternal(state.CovClient, state.CovAddress, device, cfg, state);
+                state.CovSubExpiry.Clear();  // force resubscription of everything
+            }
+
+            // Renew expiring subscriptions
+            EnsureCovSubscriptions(state, cfg);
+
+            // Attribute drip-poll – read one (object × property) slot if rate allows
+            var attrPropIds = ParsePropertyIds(cfg.Properties.Attributes);
+            var attrKv = DrainAttributePoll(
+                state, state.CovClient, state.CovAddress!, attrPropIds,
+                covCfg.AttributePollRatePerMinute);
+            foreach (var kv in attrKv)
+                result.Attributes[kv.Key] = kv.Value;
+
+            // Telemetry from COV cache – emit cached present values for ALL COV objects
+            // every tick so ThingsBoard always has a recent data point, even when a live
+            // UDP notification was lost.  Objects in CovFallbackPoll are polled directly.
+            var telPropIds = ParsePropertyIds(cfg.Properties.Telemetry);
+
+            // COV-subscribed objects: use the in-memory cache populated by OnCOVNotification
+            lock (_stateLock)
+            {
+                foreach (var obj in state.CachedObjects
+                    .Where(o => !state.CovFallbackPoll.Contains(o.ObjectId)))
+                {
+                    if (state.CovValues.TryGetValue(obj.ObjectId, out var snap))
+                    {
+                        // PROP_PRESENT_VALUE is the only telemetry property read via COV
+                        string key = $"{obj.KeyPrefix}_{PropSuffix(BacnetPropertyIds.PROP_PRESENT_VALUE)}";
+                        result.Telemetry[key] = Math.Round(snap.Value, 4);
+                    }
+                }
+            }
+
+            // Fallback poll – objects that NAK'd COV: read telemetry the old way
+            if (telPropIds.Length > 0 && state.CovFallbackPoll.Count > 0)
+            {
+                var fallback = state.CachedObjects
+                    .Where(o => state.CovFallbackPoll.Contains(o.ObjectId));
+                foreach (var obj in fallback)
+                {
+                    var vals = ReadObjectProperties(
+                        state.CovClient, state.CovAddress!, obj.ObjectId, telPropIds);
+                    foreach (var p in telPropIds)
+                        if (vals.TryGetValue(p, out var raw) && TryToDouble(raw, out double d))
+                            result.Telemetry[$"{obj.KeyPrefix}_{PropSuffix(p)}"] =
+                                Math.Round(d, 4);
+                }
+            }
+
+            // Propagate hierarchy dirty flag once per discovery cycle
+            if (state.HierarchyDirty)
+            {
+                result.HierarchyDirty = true;
+                state.HierarchyDirty  = false;
+            }
+
+            return result;
+        }
+
+        /// <summary>
+        /// Drip-polls exactly one (object × attribute-property) slot per call when the
+        /// configured rate allows it. Returns a single-entry Attributes dict (or empty).
+        /// The cursor advances round-robin across all cached objects × all attribute properties.
+        /// </summary>
+        static Attributes DrainAttributePoll(
+            DiscoveryState      state,
+            BacnetClient        client,
+            BacnetAddress       address,
+            BacnetPropertyIds[] attrProps,
+            int                 ratePerMinute)
+        {
+            var result = new Attributes();
+            if (attrProps.Length == 0 || state.CachedObjects.Count == 0)
+                return result;
+
+            var now = DateTime.UtcNow;
+            if (state.NextAttrPoll > now)
+                return result;   // rate-limit: not yet
+
+            int totalSlots = state.CachedObjects.Count * attrProps.Length;
+            int slot   = state.AttrPollCursor % totalSlots;
+            int objIdx = slot / attrProps.Length;
+            int pIdx   = slot % attrProps.Length;
+
+            var obj    = state.CachedObjects[objIdx];
+            var propId = attrProps[pIdx];
+
+            try
+            {
+                if (client.ReadPropertyRequest(address, obj.ObjectId, propId,
+                        out IList<BacnetValue> vals)
+                    && vals.Count > 0)
+                {
+                    result[$"{obj.KeyPrefix}_{PropSuffix(propId)}"] =
+                        vals[0].Value?.ToString() ?? "";
+                }
+            }
+            catch { /* property unavailable on this object */ }
+
+            state.AttrPollCursor = (state.AttrPollCursor + 1) % totalSlots;
+            double intervalMs    = ratePerMinute > 0 ? 60_000.0 / ratePerMinute : 12_000;
+            state.NextAttrPoll   = now.AddMilliseconds(intervalMs);
+
+            return result;
+        }
+
+        /// <summary>
+        /// Unsubscribes all COV subscriptions and disposes the long-lived client for a device.
+        /// Called from Program.cs on graceful shutdown.
+        /// </summary>
+        public void DisposeCovClient(string deviceName)
+        {
+            lock (_stateLock)
+            {
+                if (!_stateByDevice.TryGetValue(deviceName, out var s)) return;
+                if (s.CovClient is null) return;
+                try
+                {
+                    // Cancel all active subscriptions before closing the socket
+                    foreach (var obj in s.CachedObjects
+                        .Where(o => !s.CovFallbackPoll.Contains(o.ObjectId)))
+                    {
+                        try
+                        {
+                            s.CovClient.SubscribeCOVRequest(
+                                s.CovAddress!, obj.ObjectId,
+                                1u, true, false, 0u, 0);
+                        }
+                        catch { /* best-effort */ }
+                    }
+                }
+                finally
+                {
+                    s.CovClient.Dispose();
+                    s.CovClient = null;
+                }
+            }
         }
 
         // =====================================================================

@@ -1,0 +1,74 @@
+# docker-compose.connector-only.yml
+#
+# STANDALONE compose: ThingsBoard + lalatec-connector only.
+# For the full end-to-end test stack (+ Modbus & BACnet simulators)
+# use the root-level docker-compose.yml instead:
+#   cd ../..  &&  docker compose up --build
+#
+# Starts:
+#   1. thingsboard       – ThingsBoard Community Edition (latest)
+#                          UI  → http://localhost:8080
+#                          MQTT→ localhost:1883
+#                          Default logins:
+#                            System admin  sysadmin@thingsboard.org / sysadmin
+#                            Tenant admin  tenant@thingsboard.org   / tenant
+#                            Customer user user@thingsboard.org     / customer
+#
+#   2. lalatec-connector – built from connector/ source,
+#                          pre-configured as a ThingsBoard Gateway device.
+#
+# Quick start (from connector/docker/):
+#   docker compose -f docker-compose.connector-only.yml up --build
+#
+# ThingsBoard needs ~60-90 s on first boot to initialise its database.
+# The connector has a restart policy so it keeps retrying until TB is ready.
+
+services:
+
+  # ── ThingsBoard CE ───────────────────────────────────────────────────────────
+  thingsboard:
+    image: thingsboard/tb-postgres:latest
+    container_name: thingsboard
+    restart: unless-stopped
+    ports:
+      - "8080:9090"   # HTTP UI  (TB internal port is 9090)
+      - "1883:1883"   # MQTT
+      - "7070:7070"   # Edge RPC (optional, comment out if unused)
+      - "5683:5683/udp"  # CoAP  (optional)
+    environment:
+      TB_QUEUE_TYPE: in-memory
+      # These two env-vars are only needed on the very first run to seed the
+      # default sysadmin account.  Safe to leave in for idempotent restarts.
+      TB_ADMIN_EMAIL:    sysadmin@thingsboard.org
+      TB_ADMIN_PASSWORD: sysadmin
+    volumes:
+      - tb-data:/data
+      - tb-logs:/var/log/thingsboard
+    healthcheck:
+      # Simple TCP-port check – works regardless of whether curl is in the image.
+      # Passes as soon as ThingsBoard's HTTP port is accepting connections.
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/9090' 2>/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+      start_period: 60s
+
+  # ── lalatec-connector ────────────────────────────────────────────────────────
+  lalatec-connector:
+    build:
+      context: ..          # project root – source files live here
+      dockerfile: docker/Dockerfile
+    container_name: lalatec-connector
+    restart: unless-stopped
+    depends_on:
+      thingsboard:
+        condition: service_healthy
+    volumes:
+      # Path is relative to this compose file (docker/connector.compose.json)
+      - ./connector.compose.json:/app/connector.json:ro
+    # Both services share the default compose network so "thingsboard"
+    # resolves to the TB container IP automatically.
+
+volumes:
+  tb-data:
+  tb-logs:

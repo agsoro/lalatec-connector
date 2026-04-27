@@ -581,3 +581,101 @@ Body: { "method": "setValue", "params": { "key": "…", "value": … }, "timeout
 | `[WB←TB] Glueck …  attr  active_allowed_power_pct = 42.5` | Attribute update received + written |
 | `[WB←TB] HVAC …    rpc   ao_3_… = 21.0  (reqId=42)` | RPC received + written |
 | `[WB←TB] ERROR …: InvalidOperationException: not commandable …` | Write rejected |
+
+---
+
+## 13. Desigo hierarchy → ThingsBoard Assets
+
+Siemens Desigo PXC/PXC5/PXC7 controllers expose their engineering tree via **BACnet Structured View objects** (`OBJECT_STRUCTURED_VIEW`, type 29).  
+The connector can walk this tree and materialise it as a **ThingsBoard Asset hierarchy** with `"Contains"` relations.
+
+### 13.1 How it works
+
+```
+DEVICE.PROP_STRUCTURED_OBJECT_LIST (property 209)
+   └─ lists top-level Structured View IDs
+        │
+        └─ OBJECT_STRUCTURED_VIEW.PROP_SUBORDINATE_LIST (property 355)
+             ├─ child Structured View  → recurse
+             └─ child data-point (AI, AV, …) → leaf asset
+```
+
+Properties read per node:
+
+| Property | Usage |
+|---|---|
+| `PROP_OBJECT_NAME` | Full dot-path (e.g. `Building.Floor2.Room201.TempSP`); last segment = Asset name |
+| `PROP_DESCRIPTION` | Human-readable label → `description` attribute |
+| `PROP_PROFILE_NAME` | Siemens point-type string → `profile_name` attribute |
+| `PROP_UNITS` | Engineering unit (for data-point leaves) → `units` attribute |
+
+### 13.2 ThingsBoard model produced
+
+```
+[Asset]  Building                         type = "BACnet Node"
+  └─ Contains → [Asset]  Floor2
+       └─ Contains → [Asset]  Room201
+            └─ Contains → [Asset]  TempSP   (leaf data-point)
+                 └─ Contains → [Device]  HVAC Controller AHU-01
+```
+
+Every Asset gets the following **SERVER_SCOPE attributes**:
+
+| Attribute | Value |
+|---|---|
+| `bacnet_path` | Full dot-path, e.g. `Building.Floor2.Room201.TempSP` |
+| `bacnet_type` | Short type alias (`ai`, `av`, `view`, …) |
+| `bacnet_instance` | Numeric instance (leaf nodes only) |
+| `description` | From `PROP_DESCRIPTION` |
+| `profile_name` | From `PROP_PROFILE_NAME` |
+| `units` | From `PROP_UNITS` (leaf nodes only, when present) |
+
+### 13.3 Config: `hierarchy` block
+
+```jsonc
+"hierarchy": {
+  "enabled":   true,        // false (or omit block) to disable for non-Desigo devices
+  "assetType": "BACnet Node"  // TB asset type string; choose to match your naming convention
+}
+```
+
+Add this block inside the device's `bacnet` config block (see `connector.example.json`).
+
+### 13.4 Startup behaviour
+
+```
+Startup
+  │
+  ├─ ThingsBoard provisioning (devices)
+  ├─ MQTT clients connected
+  │
+  └─ [background Task per device, hierarchy.enabled = true]
+        │
+        ├─ Wait for first poll cycle → BACnet discovery runs → Structured Views walked
+        └─ DesigoProvisioner.ProvisionAsync()
+              ├─ EnsureAssetAsync() for each node (idempotent)
+              ├─ SetAssetAttributesAsync() with description / path / type
+              └─ EnsureRelationAsync() for parent→child and leaf→device
+```
+
+The provisioner runs **once** after startup.  Provisioning is fully **idempotent** — re-running the connector will not create duplicate assets or relations.
+
+### 13.5 Files involved
+
+| File | Role |
+|---|---|
+| `BacnetHierarchy.cs` | Walks Structured View tree → `DesigoTree` |
+| `DesigoProvisioner.cs` | Materialises `DesigoTree` into TB Assets + Relations |
+| `ThingsBoardApi.cs` | `EnsureAssetAsync`, `EnsureRelationAsync`, `SetAssetAttributesAsync` |
+| `BacnetReader.cs` | Stores tree in `DiscoveryState.Tree`; exposes `GetDiscoveredTree()` |
+| `Program.cs` | Launches background provisioning job |
+
+### 13.6 Graceful degradation
+
+If the device does not expose any Structured View objects (e.g. generic BACnet devices, Modbus, etc.):
+
+- `PROP_STRUCTURED_OBJECT_LIST` returns empty → `DesigoTree.Roots` is empty.
+- The provisioner logs `[Hierarchy] No Structured View roots – nothing to provision.` and exits cleanly.
+- Normal polling continues unaffected.
+- Leave `hierarchy.enabled` as `false` (or omit the block) for non-Desigo devices.
+
