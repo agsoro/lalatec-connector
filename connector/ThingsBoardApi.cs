@@ -65,8 +65,8 @@ namespace Connector
 
         // ── Device provisioning ───────────────────────────────────────────────
 
-        /// <summary>Creates the device if it doesn't exist yet, then (re-)applies the access token. Idempotent.</summary>
-        public async Task EnsureDeviceAsync(string deviceName, string tbDeviceType, string accessToken)
+        /// <summary>Creates the device if it doesn't exist yet, then (re-)applies the access token. Idempotent. Returns UUID.</summary>
+        public async Task<string> EnsureDeviceAsync(string deviceName, string tbDeviceType, string accessToken)
         {
             string? deviceId = await FindDeviceIdInternalAsync(deviceName);
 
@@ -85,10 +85,11 @@ namespace Connector
             }
             else
             {
-                Console.WriteLine($"  [TB] Existing → {deviceName}");
+                Console.WriteLine($"  [TB] Existing → {deviceName}  (UUID={deviceId})");
             }
 
             await SetAccessTokenAsync(deviceId, accessToken);
+            return deviceId;
         }
 
         async Task<string?> FindDeviceIdInternalAsync(string name)
@@ -151,11 +152,11 @@ namespace Connector
             return id;
         }
 
-        async Task<string?> FindAssetIdAsync(string name)
+        public async Task<string?> FindAssetIdAsync(string name)
         {
             // textSearch does a prefix/contains match; we verify exact name in the results
             var resp = await _http.GetAsync(
-                $"/api/tenant/assets?pageSize=20&page=0&textSearch={System.Web.HttpUtility.UrlEncode(name)}");
+                $"/api/tenant/assets?pageSize=1000&page=0&textSearch={System.Web.HttpUtility.UrlEncode(name)}");
             if (!resp.IsSuccessStatusCode) return null;
 
             var body = await resp.Content.ReadFromJsonAsync<JsonElement>();
@@ -302,7 +303,7 @@ namespace Connector
             return id;
         }
 
-        async Task<string?> FindEntityViewIdAsync(string name)
+        public async Task<string?> FindEntityViewIdAsync(string name)
         {
             var resp = await _http.GetAsync(
                 $"/api/tenant/entityViews?pageSize=20&page=0&textSearch={System.Web.HttpUtility.UrlEncode(name)}");
@@ -314,6 +315,101 @@ namespace Connector
                     return ev.GetProperty("id").GetProperty("id").GetString();
 
             return null;
+        }
+
+        // ── Alarms ───────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// Creates a new alarm or updates an existing active alarm for the given entity.
+        /// ThingsBoard automatically groups active alarms by (originator, type).
+        /// </summary>
+        public async Task CreateOrUpdateAlarmAsync(
+            string entityId, string type, string severity, string message,
+            object? details = null, string entityType = "DEVICE")
+        {
+            await RefreshIfNeededAsync();
+
+            // Build the details dict – always include the human-readable message
+            var detailsDict = details as Dictionary<string, object>
+                              ?? new Dictionary<string, object>();
+            if (!detailsDict.ContainsKey("message"))
+                detailsDict["message"] = message;
+
+            var alarm = new
+            {
+                originator = new { id = entityId, entityType = entityType },
+                type       = type,
+                severity   = severity,
+                status     = "ACTIVE_UNACK",
+                details    = detailsDict,
+            };
+            var resp = await _http.PostAsJsonAsync("/api/alarm", alarm);
+            if (!resp.IsSuccessStatusCode)
+            {
+                string body = await resp.Content.ReadAsStringAsync();
+                Console.Error.WriteLine(
+                    $"  [TB] WARN: Failed to create alarm '{type}' for {entityId}: {resp.StatusCode} – {body}");
+            }
+            else
+            {
+                Console.WriteLine($"  [TB] Alarm raised: [{severity}] {type} on {entityType}/{entityId}");
+            }
+        }
+
+        /// <summary>
+        /// Fetches the latest alarm of a specific type for an entity.
+        /// </summary>
+        public async Task<JsonElement?> GetLatestAlarmAsync(string entityId, string type, string entityType = "DEVICE")
+        {
+            await RefreshIfNeededAsync();
+            var resp = await _http.GetAsync($"/api/alarm/{entityType}/{entityId}/{System.Web.HttpUtility.UrlEncode(type)}");
+            if (!resp.IsSuccessStatusCode) return null;
+            return await resp.Content.ReadFromJsonAsync<JsonElement>();
+        }
+
+        /// <summary>
+        /// Fetches all active alarms for an entity.
+        /// </summary>
+        public async Task<List<JsonElement>> GetActiveAlarmsAsync(string entityId, string entityType = "DEVICE")
+        {
+            await RefreshIfNeededAsync();
+            var resp = await _http.GetAsync($"/api/alarm/{entityType}/{entityId}?pageSize=100&page=0&status=ACTIVE_UNACK");
+            if (!resp.IsSuccessStatusCode) return new List<JsonElement>();
+            
+            var doc = await resp.Content.ReadFromJsonAsync<JsonElement>();
+            if (doc.TryGetProperty("data", out var data) && data.ValueKind == JsonValueKind.Array)
+                return data.EnumerateArray().ToList();
+            return new List<JsonElement>();
+        }
+
+        /// <summary>
+        /// Clears an alarm by its UUID.
+        /// </summary>
+        public async Task<bool> ClearAlarmByIdAsync(string alarmId)
+        {
+            await RefreshIfNeededAsync();
+            var resp = await _http.PostAsync($"/api/alarm/{alarmId}/clear", null);
+            return resp.IsSuccessStatusCode;
+        }
+
+        /// <summary>
+        /// Finds and clears an active alarm of the given type for the specified entity.
+        /// </summary>
+        public async Task ClearAlarmAsync(string entityId, string type, string entityType = "DEVICE")
+        {
+            var alarm = await GetLatestAlarmAsync(entityId, type, entityType);
+            if (alarm == null) return;
+
+            try
+            {
+                string status = alarm.Value.GetProperty("status").GetString() ?? "";
+                if (status.StartsWith("CLEARED")) return;
+
+                string id = alarm.Value.GetProperty("id").GetProperty("id").GetString()!;
+                if (await ClearAlarmByIdAsync(id))
+                    Console.WriteLine($"  [TB] Cleared alarm: {type}");
+            }
+            catch { /* ignore parse errors */ }
         }
     }
 }

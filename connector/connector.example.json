@@ -1,4 +1,4 @@
-﻿{
+{
   // Copy this file to connector.json and fill in your values.
 
   "thingsboard": {
@@ -156,7 +156,9 @@
 
           // Read on every poll → published as ThingsBoard time-series.
           "telemetry": [
-            "PROP_PRESENT_VALUE"
+            "PROP_PRESENT_VALUE",
+            "PROP_STATUS_FLAGS",
+            "PROP_RELIABILITY"
           ],
 
           // Read once on startup (and after each rediscovery) →
@@ -164,8 +166,7 @@
           "attributes": [
             "PROP_OBJECT_NAME",
             "PROP_DESCRIPTION",
-            "PROP_UNITS",
-            "PROP_STATUS_FLAGS"
+            "PROP_UNITS"
           ]
         },
 

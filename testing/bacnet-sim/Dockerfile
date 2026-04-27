@@ -1,13 +1,4 @@
-FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
-WORKDIR /src
-COPY BacnetSim.csproj ./
-RUN dotnet restore
-COPY . ./
-RUN dotnet publish BacnetSim.csproj -c Release -o /app/publish --no-restore
-
-FROM mcr.microsoft.com/dotnet/runtime:8.0 AS runtime
+FROM lalatec-connector-bacnet-sim:latest
 WORKDIR /app
-COPY --from=build /app/publish .
-# BACnet/IP uses UDP 47808; host networking is set in docker-compose
-EXPOSE 47808/udp
+COPY publish/ .
 ENTRYPOINT ["dotnet", "BacnetSim.dll"]

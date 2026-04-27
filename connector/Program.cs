@@ -1,4 +1,4 @@
-﻿// Program.cs – entry point; wires everything together
+// Program.cs – entry point; wires everything together
 //
 //  ThingsBoard publish topics:
 //    Telemetry   →  v1/devices/me/telemetry    (timestamped time-series)
@@ -71,10 +71,11 @@ namespace Connector
             var tbApi = new ThingsBoardApi(cfg.ThingsBoard);
             await tbApi.LoginAsync();
 
+            var deviceIds = new Dictionary<string, string>();
             foreach (var d in cfg.Devices)
             {
                 string tbType = DeviceReaderFactory.Get(d.DeviceType).DriverName;
-                await tbApi.EnsureDeviceAsync(d.Name, tbType, d.AccessToken);
+                deviceIds[d.Name] = await tbApi.EnsureDeviceAsync(d.Name, tbType, d.AccessToken);
             }
 
             // ── MQTT clients (one per device) ─────────────────────────────────
@@ -176,15 +177,21 @@ namespace Connector
                             $"(device UUID={tbDeviceId}, roots={tree.Roots.Count})…");
                         var provisioner = new DezikoProvisioner();
                         var leafMap = await provisioner.ProvisionAsync(
-                            tree, tbApi, tbDeviceId,
+                            tree,
+                            bacnetReader.GetDiscoveredObjects(capturedDevice.Name),
+                            tbApi, tbDeviceId,
                             capturedDevice.Bacnet!.Hierarchy!.AssetType,
                             cts.Token);
 
                         // Store the leaf map so the poll loop can route telemetry to assets
                         lock (leafMaps)
                             leafMaps[capturedDevice.Name] = leafMap;
+
+                        // Also push the mapping into the BacnetReader instance so it can route alarms to assets
+                        bacnetReader.UpdateAssetIdMap(capturedDevice.Name, leafMap, tbApi, capturedDevice, tbDeviceId);
+
                         Console.WriteLine(
-                            $"  [Hierarchy] Leaf map: {leafMap.Count} data-point assets registered for telemetry routing.");
+                            $"  [Hierarchy] Leaf map: {leafMap.Count} data-point assets registered for telemetry and alarm routing.");
                     }
                     catch (OperationCanceledException) { /* shutting down */ }
                     catch (Exception ex)
@@ -205,6 +212,9 @@ namespace Connector
 
             int globalIntervalMs = cfg.Polling.IntervalSeconds * 1000;
 
+            // Tracks devices with active "Communication Loss" alarms
+            var offlineDevices = new HashSet<string>();
+
             // ── COV init: set up long-lived clients for COV-enabled BACnet devices ──
             foreach (var d in cfg.Devices)
             {
@@ -218,6 +228,7 @@ namespace Connector
                 bacnetReader.InitCovMode(
                     capturedConn,
                     capturedDevice,
+                    tbApi,
                     tel  => PublishTelemetryAsync(capturedMqtt, tel),
                     attr => PublishAttributesAsync(capturedMqtt, attr));
 
@@ -238,7 +249,7 @@ namespace Connector
                         d.PollIntervalSeconds.HasValue
                             ? d.PollIntervalSeconds.Value * 1000
                             : globalIntervalMs,
-                        tbApi, leafMaps))
+                        tbApi, deviceIds, offlineDevices, leafMaps))
                     .ToList();
 
                 await Task.WhenAll(tasks);
@@ -265,6 +276,8 @@ namespace Connector
             Dictionary<DeviceConfig, DateTime> lastPolledAt,
             int deviceIntervalMs,
             ThingsBoardApi tbApi,
+            Dictionary<string, string> deviceIds,
+            HashSet<string> offlineDevices,
             Dictionary<string, Dictionary<string, string>> leafMaps)
         {
             try
@@ -308,7 +321,7 @@ namespace Connector
 
                 if (reader is BacnetReader br)
                 {
-                    var result = br.ReadFull(conn, device);
+                    var result = br.ReadFull(conn, device, tbApi);
                     telemetry  = result.Telemetry;
                     attributes = result.Attributes;
                 }
@@ -336,11 +349,25 @@ namespace Connector
                         $"{"",13}  {"[attrs]",-10}  " +
                         $"{string.Join(", ", attributes.Keys.Take(5))}" +
                         $"{(attributes.Count > 5 ? $" … +{attributes.Count - 5} more" : "")}");
+
+                // ── Clear Communication Loss Alarm on success ─────────────────
+                if (offlineDevices.Remove(device.Name))
+                {
+                    _ = tbApi.ClearAlarmAsync(deviceIds[device.Name], "Communication Loss");
+                }
             }
             catch (Exception ex)
             {
                 Console.Error.WriteLine(
                     $"[{DateTime.Now:HH:mm:ss}] ERROR [{device.DeviceType}] {device.Name}: {ex.Message}");
+
+                // ── Communication Loss Alarm ──────────────────────────────────
+                if (offlineDevices.Add(device.Name))
+                {
+                    _ = tbApi.CreateOrUpdateAlarmAsync(
+                        deviceIds[device.Name], "Communication Loss", "CRITICAL",
+                        $"Device {device.Name} is not responding: {ex.Message}");
+                }
             }
         }
 

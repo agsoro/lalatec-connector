@@ -1,4 +1,4 @@
-﻿// DezikoProvisioner.cs – materialises a DezikoTree into ThingsBoard Assets + Relations
+// DezikoProvisioner.cs – materialises a DezikoTree into ThingsBoard Assets + Relations
 //
 //  Model produced in ThingsBoard:
 //
@@ -35,17 +35,19 @@ namespace Connector
         /// for every leaf data-point asset, so the caller can post telemetry directly to assets.
         /// </summary>
         public async Task<Dictionary<string, string>> ProvisionAsync(
-            DezikoTree     tree,
-            ThingsBoardApi api,
-            string         tbDeviceId,
-            string         assetType,
-            CancellationToken ct = default)
+            DezikoTree                 tree,
+            List<BacnetObjectInfo>     cachedObjects,
+            ThingsBoardApi             api,
+            string                     tbDeviceId,
+            string                     assetType,
+            CancellationToken          ct)
         {
-            var leafMap = new Dictionary<string, string>();   // keyPrefix → assetId
+            var leafMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            var visited = new HashSet<BacnetObjectId>();
 
-            if (tree.Roots.Count == 0)
+            if (tree.Roots.Count == 0 && cachedObjects.Count == 0)
             {
-                Console.WriteLine("  [Hierarchy] No Structured View roots – nothing to provision.");
+                Console.WriteLine("  [Hierarchy] Nothing to provision.");
                 return leafMap;
             }
 
@@ -55,7 +57,47 @@ namespace Connector
             {
                 ct.ThrowIfCancellationRequested();
                 await ProvisionNodeAsync(root, parentAssetId: null, parentName: null, api,
-                                        tbDeviceId, assetType, counters, leafMap, ct);
+                                        tbDeviceId, assetType, counters, leafMap, visited, ct);
+            }
+
+            // Provision orphans: objects with a naming path that were NOT reached by the hierarchy walk.
+            // These often occur in controllers like Desigo CC where the structured views are 
+            // difficult to traverse fully.
+            Console.WriteLine($"  [Hierarchy] Tree walk reached {visited.Count} unique objects. Checking {cachedObjects.Count} cached objects for orphans...");
+            foreach (var obj in cachedObjects)
+            {
+                if (visited.Contains(obj.ObjectId)) continue;
+                
+                if (obj.NamingPath.Count < 2) 
+                {
+                    // Console.WriteLine($"  [Hierarchy]   Skipping potential orphan {obj.ObjectId}: NamingPath.Count={obj.NamingPath.Count}");
+                    continue;
+                }
+
+                ct.ThrowIfCancellationRequested();
+
+                // We try to reconstruct a folder structure from the path.
+                // For orphans, we just create the leaf asset named "Parent / Child".
+                string parentName = obj.NamingPath[^2];
+                string childName  = obj.NamingPath[^1];
+                string assetName  = $"{parentName} / {childName}";
+
+                string assetId = await api.EnsureAssetAsync(assetName, assetType);
+                counters.Assets++;
+
+                // Ensure relation to the device
+                await api.EnsureRelationAsync(tbDeviceId, "DEVICE", assetId, "ASSET");
+                counters.Relations++;
+
+                // Create Entity View
+                string viewName = $"{obj.ObjectName} ({assetName})";
+                await api.EnsureEntityViewAsync(viewName, assetType, assetId, "ASSET", new[] { obj.KeyPrefix }, new string[] { });
+                counters.EntityViews++;
+
+                leafMap[obj.KeyPrefix] = assetId;
+                visited.Add(obj.ObjectId);
+
+                Console.WriteLine($"  [Hierarchy]   Orphan Asset: '{assetName}' (key={obj.KeyPrefix})");
             }
 
             Console.WriteLine(
@@ -77,23 +119,26 @@ namespace Connector
             string         assetType,
             Counters       c,
             Dictionary<string, string> leafMap,
+            HashSet<BacnetObjectId> visited,
             CancellationToken ct)
         {
             ct.ThrowIfCancellationRequested();
 
-            // The TB asset name is the last dot-segment; it must be unique within a
-            // given level of the tree.  If two sibling views share the same short name
-            // (rare in Deziko but possible), we append the instance number.
-            string assetName = node.ShortName;
+            // The TB asset name is the friendly name.
+            string assetName = node.FriendlyName;
+            if (string.IsNullOrEmpty(assetName)) assetName = node.ShortName;
 
             string assetId = await api.EnsureAssetAsync(assetName, assetType);
             c.Assets++;
-            Console.WriteLine($"  [Hierarchy]   Asset: '{assetName}' (id={assetId})");
+            visited.Add(node.ObjectId);
+            Console.WriteLine($"  [Hierarchy]   Asset: '{assetName}' (key={node.ObjectName})");
 
             // Set rich attributes on the asset
             var attrs = new Dictionary<string, string>
             {
-                ["bacnet_path"]     = node.ObjectName,
+                ["bacnet_path"]     = node.NamingPath.Any() ? string.Join(" / ", node.NamingPath) : node.ObjectName,
+                ["bacnet_key"]      = node.ObjectName,
+                ["bacnet_id"]       = node.ObjectId.ToString(),
                 ["bacnet_type"]     = node.IsView
                                         ? "view"
                                         : ShortType(node.ObjectId.type),
@@ -125,23 +170,26 @@ namespace Connector
                 if (child.IsView)
                 {
                     await ProvisionNodeAsync(child, assetId, assetName, api,
-                                            tbDeviceId, assetType, c, leafMap, ct);
+                                            tbDeviceId, assetType, c, leafMap, visited, ct);
                 }
                 else
                 {
                     // Leaf data-point: qualify the name with the parent view name to avoid
                     // collisions between identically-named points under different views.
                     string leafName = string.IsNullOrEmpty(assetName)
-                        ? child.ShortName
-                        : $"{assetName} / {child.ShortName}";
+                        ? child.FriendlyName
+                        : $"{assetName} / {child.FriendlyName}";
 
                     string leafId = await api.EnsureAssetAsync(leafName, assetType);
                     c.Assets++;
-                    Console.WriteLine($"  [Hierarchy]   Leaf:  '{leafName}' ({ShortType(child.ObjectId.type)}:{child.ObjectId.instance})");
+                    visited.Add(child.ObjectId);
+                    Console.WriteLine($"  [Hierarchy]   Leaf:  '{leafName}' ({child.ObjectId} / key={child.ObjectName})");
 
                     var leafAttrs = new Dictionary<string, string>
                     {
-                        ["bacnet_path"]     = child.ObjectName,
+                        ["bacnet_path"]     = child.NamingPath.Any() ? string.Join(" / ", child.NamingPath) : child.ObjectName,
+                        ["bacnet_key"]      = child.ObjectName,
+                        ["bacnet_id"]       = child.ObjectId.ToString(),
                         ["bacnet_type"]     = ShortType(child.ObjectId.type),
                         ["bacnet_instance"] = child.ObjectId.instance.ToString(),
                         ["description"]     = child.Description,
@@ -152,8 +200,6 @@ namespace Connector
 
                     await api.SetAssetAttributesAsync(leafId, leafAttrs);
 
-                    // Build key-prefix identical to what BacnetReader.cs uses:
-                    // ShortType + "_" + instance  (e.g. "ai_1", "ao_1", "bi_1")
                     string keyPrefix = $"{ShortType(child.ObjectId.type)}_{child.ObjectId.instance}";
                     leafMap[keyPrefix] = leafId;
 
@@ -165,10 +211,9 @@ namespace Connector
                     await api.EnsureRelationAsync(leafId, "ASSET", tbDeviceId, "DEVICE");
                     c.Relations++;
 
-                    // ── Entity View for this data-point ───────────────────────
                     // The view references the leaf Asset and exposes the live
                     // 'value' timeseries plus human-readable server attributes.
-                    var evAttrs = new[] { "bacnet_path", "bacnet_type", "bacnet_instance",
+                    var evAttrs = new[] { "bacnet_path", "bacnet_key", "bacnet_id", "bacnet_type", "bacnet_instance",
                                          "description", "profile_name", "units" };
                     string evId = await api.EnsureEntityViewAsync(
                         viewName:          leafName,

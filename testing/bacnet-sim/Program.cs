@@ -7,6 +7,7 @@ using System.IO;
 using System.IO.BACnet;
 using System.Linq;
 using System.Text.Json;
+using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -36,15 +37,27 @@ foreach (var obj in root.GetProperty("objects").EnumerateArray())
     var typeStr = obj.GetProperty("type").GetString() ?? "OBJECT_DEVICE";
     var inst    = obj.GetProperty("instance").GetUInt32();
     var type    = Enum.Parse<BacnetObjectTypes>(typeStr);
-    var key     = $"{type}:{inst}";
+    var key     = $"{(int)type}:{inst}";
 
     var props = new Dictionary<BacnetPropertyIds, List<BacnetValue>>();
     foreach (var prop in obj.GetProperty("properties").EnumerateArray())
     {
         var idStr  = prop.GetProperty("id").GetString() ?? "PROP_OBJECT_NAME";
         var tagStr = prop.GetProperty("tag").GetString() ?? "BACNET_APPLICATION_TAG_CHARACTER_STRING";
-        var id     = Enum.Parse<BacnetPropertyIds>(idStr);
-        var tag    = Enum.Parse<BacnetApplicationTags>(tagStr);
+
+        BacnetPropertyIds id;
+        if (idStr == "PROP_STRUCTURED_OBJECT_LIST") id = (BacnetPropertyIds)209;
+        else if (idStr == "PROP_SUBORDINATE_LIST")   id = (BacnetPropertyIds)355;
+        else if (idStr == "PROP_PROFILE_NAME")       id = (BacnetPropertyIds)168;
+        else if (int.TryParse(idStr, out int num))    id = (BacnetPropertyIds)num;
+        else if (!Enum.TryParse<BacnetPropertyIds>(idStr, out id))
+        {
+            if (idStr.StartsWith("PROP_") && int.TryParse(idStr.Substring(5), out int numId))
+                id = (BacnetPropertyIds)numId;
+            else continue;
+        }
+
+        var tag = Enum.Parse<BacnetApplicationTags>(tagStr);
 
         var values = new List<BacnetValue>();
         foreach (var val in prop.GetProperty("values").EnumerateArray())
@@ -70,30 +83,30 @@ static BacnetValue ParseJsonValue(JsonElement el, BacnetApplicationTags tag)
 
     object val = tag switch
     {
-        BacnetApplicationTags.BACNET_APPLICATION_TAG_BOOLEAN    => el.GetBoolean(),
-        BacnetApplicationTags.BACNET_APPLICATION_TAG_REAL       => (float)el.GetDouble(),
-        BacnetApplicationTags.BACNET_APPLICATION_TAG_DOUBLE     => el.GetDouble(),
-        BacnetApplicationTags.BACNET_APPLICATION_TAG_UNSIGNED_INT => el.GetUInt32(),
-        BacnetApplicationTags.BACNET_APPLICATION_TAG_SIGNED_INT   => el.GetInt32(),
-        BacnetApplicationTags.BACNET_APPLICATION_TAG_ENUMERATED   => el.GetUInt32(),
-        BacnetApplicationTags.BACNET_APPLICATION_TAG_DATE         => DateTime.Parse(el.GetString() ?? "0001-01-01"),
-        BacnetApplicationTags.BACNET_APPLICATION_TAG_TIME         => DateTime.Parse(el.GetString() ?? "00:00:00"),
-        BacnetApplicationTags.BACNET_APPLICATION_TAG_DATETIME     => DateTime.Parse(el.GetString() ?? "0001-01-01"),
-        BacnetApplicationTags.BACNET_APPLICATION_TAG_TIMESTAMP    => DateTime.Parse(el.GetString() ?? "0001-01-01"),
-        BacnetApplicationTags.BACNET_APPLICATION_TAG_BIT_STRING   => BacnetBitString.Parse(el.GetString() ?? ""),
-        BacnetApplicationTags.BACNET_APPLICATION_TAG_OCTET_STRING => HexToBytes(el.GetString() ?? ""),
-        (BacnetApplicationTags)0 /* CONTEXT_SPECIFIC */           => HexToBytes(el.GetString() ?? ""),
-        BacnetApplicationTags.BACNET_APPLICATION_TAG_OBJECT_ID   => BacnetObjectId.Parse(el.GetString() ?? ""),
-        BacnetApplicationTags.BACNET_APPLICATION_TAG_OBJECT_PROPERTY_REFERENCE => ParseObjectPropertyReference(el.GetString() ?? ""),
-        _ => el.GetString() ?? ""
+        BacnetApplicationTags.BACNET_APPLICATION_TAG_BOOLEAN    => el.ValueKind == JsonValueKind.True || (el.ValueKind == JsonValueKind.False ? false : (el.ValueKind == JsonValueKind.Number ? el.GetDouble() != 0 : false)),
+        BacnetApplicationTags.BACNET_APPLICATION_TAG_REAL       => el.ValueKind == JsonValueKind.Number ? (float)el.GetDouble() : 0.0f,
+        BacnetApplicationTags.BACNET_APPLICATION_TAG_DOUBLE     => el.ValueKind == JsonValueKind.Number ? el.GetDouble() : 0.0,
+        BacnetApplicationTags.BACNET_APPLICATION_TAG_UNSIGNED_INT => el.ValueKind == JsonValueKind.Number ? el.GetUInt32() : 0u,
+        BacnetApplicationTags.BACNET_APPLICATION_TAG_SIGNED_INT   => el.ValueKind == JsonValueKind.Number ? el.GetInt32() : 0,
+        BacnetApplicationTags.BACNET_APPLICATION_TAG_ENUMERATED   => el.ValueKind == JsonValueKind.Number ? el.GetUInt32() : 0u,
+        BacnetApplicationTags.BACNET_APPLICATION_TAG_DATE         => DateTime.Parse((el.ValueKind == JsonValueKind.String ? el.GetString() : "0001-01-01")?.Replace("\u202f", " ") ?? "0001-01-01", CultureInfo.InvariantCulture),
+        BacnetApplicationTags.BACNET_APPLICATION_TAG_TIME         => DateTime.Parse((el.ValueKind == JsonValueKind.String ? el.GetString() : "00:00:00")?.Replace("\u202f", " ") ?? "00:00:00", CultureInfo.InvariantCulture),
+        BacnetApplicationTags.BACNET_APPLICATION_TAG_DATETIME     => DateTime.Parse((el.ValueKind == JsonValueKind.String ? el.GetString() : "0001-01-01")?.Replace("\u202f", " ") ?? "0001-01-01", CultureInfo.InvariantCulture),
+        BacnetApplicationTags.BACNET_APPLICATION_TAG_TIMESTAMP    => DateTime.Parse((el.ValueKind == JsonValueKind.String ? el.GetString() : "0001-01-01")?.Replace("\u202f", " ") ?? "0001-01-01", CultureInfo.InvariantCulture),
+        BacnetApplicationTags.BACNET_APPLICATION_TAG_BIT_STRING   => BacnetBitString.Parse(el.ValueKind == JsonValueKind.String ? el.GetString() ?? "" : ""),
+        BacnetApplicationTags.BACNET_APPLICATION_TAG_OCTET_STRING => HexToBytes(el.ValueKind == JsonValueKind.String ? el.GetString() ?? "" : ""),
+        (BacnetApplicationTags)0 /* CONTEXT_SPECIFIC */           => HexToBytes(el.ValueKind == JsonValueKind.String ? el.GetString() ?? "" : ""),
+        BacnetApplicationTags.BACNET_APPLICATION_TAG_OBJECT_ID   => BacnetObjectId.Parse(el.ValueKind == JsonValueKind.String ? el.GetString() ?? "OBJECT_DEVICE:0" : "OBJECT_DEVICE:0"),
+        BacnetApplicationTags.BACNET_APPLICATION_TAG_OBJECT_PROPERTY_REFERENCE => ParseObjectPropertyReference(el.ValueKind == JsonValueKind.String ? el.GetString() ?? "" : ""),
+        _ => el.ValueKind == JsonValueKind.String ? el.GetString() ?? "" : el.ToString()
     };
     return new BacnetValue(tag, val);
 }
 
 static BacnetDeviceObjectPropertyReference ParseObjectPropertyReference(string s)
 {
-    // Format: "OBJECT_TYPE:INSTANCE:PROPERTY_ID"
-    var parts = s.Split(':');
+    // Format can be "OBJECT_TYPE:INSTANCE:PROPERTY_ID" or "OBJECT_TYPE:INSTANCE.PROPERTY_ID"
+    var parts = s.Replace('.', ':').Split(':');
     if (parts.Length < 2) return new BacnetDeviceObjectPropertyReference();
     return new BacnetDeviceObjectPropertyReference
     {
@@ -135,10 +148,19 @@ client.OnWhoIs += (sender, adr, lo, hi) =>
 client.OnReadPropertyRequest += (sender, adr, invokeId, objectId, property, _) =>
 {
     var propId = (BacnetPropertyIds)property.propertyIdentifier;
-    Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] REQ {objectId}  prop={propId}  idx={property.propertyArrayIndex}  from={adr}");
+    string key = $"{(int)objectId.type}:{objectId.instance}";
+    Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] REQ {objectId} (key={key}) prop={propId} from={adr}");
     
     try
     {
+        if (!storage.ContainsKey(key))
+        {
+            Console.WriteLine($"  => UNKNOWN OBJECT: '{key}'");
+            // Also check if any key ends with the instance
+            var similar = storage.Keys.Where(k => k.EndsWith($":{objectId.instance}")).ToList();
+            if (similar.Any()) Console.WriteLine($"     Similar keys: {string.Join(", ", similar)}");
+        }
+
         // Special Handling for lists that may need indexing
         if (propId == BacnetPropertyIds.PROP_OBJECT_LIST && objectId.type == BacnetObjectTypes.OBJECT_DEVICE)
         {
@@ -146,7 +168,7 @@ client.OnReadPropertyRequest += (sender, adr, invokeId, objectId, property, _) =
             return;
         }
 
-        if (storage.TryGetValue(objectId.ToString(), out var props) && props.TryGetValue(propId, out var values))
+        if (storage.TryGetValue(key, out var props) && props.TryGetValue(propId, out var values))
         {
             // If it's a list request
             if (property.propertyArrayIndex != uint.MaxValue)
@@ -205,7 +227,8 @@ client.OnReadPropertyMultipleRequest += (sender, adr, invokeId, props, _) =>
     foreach (var req in props)
     {
         var pvList = new List<BacnetPropertyValue>();
-        storage.TryGetValue(req.objectIdentifier.ToString(), out var objProps);
+        string key = $"{(int)req.objectIdentifier.type}:{req.objectIdentifier.instance}";
+        storage.TryGetValue(key, out var objProps);
 
         foreach (var pref in req.propertyReferences)
         {
@@ -238,7 +261,8 @@ client.OnReadPropertyMultipleRequest += (sender, adr, invokeId, props, _) =>
 client.OnWritePropertyRequest += (sender, adr, invokeId, objectId, value, _) =>
 {
     var propId = (BacnetPropertyIds)value.property.propertyIdentifier;
-    if (storage.TryGetValue(objectId.ToString(), out var props))
+    string key = $"{(int)objectId.type}:{objectId.instance}";
+    if (storage.TryGetValue(key, out var props))
     {
         props[propId] = value.value.ToList();
         sender.SimpleAckResponse(adr, BacnetConfirmedServices.SERVICE_CONFIRMED_WRITE_PROPERTY, invokeId);
@@ -251,7 +275,7 @@ client.OnWritePropertyRequest += (sender, adr, invokeId, objectId, value, _) =>
 
 client.OnSubscribeCOV += (sender, adr, invokeId, processId, objectId, cancel, confirmed, lifetime, _) =>
 {
-    string key = objectId.ToString();
+    string key = $"{(int)objectId.type}:{objectId.instance}";
     lock (covLock)
     {
         if (!covSubs.ContainsKey(key)) covSubs[key] = new List<CovSub>();
@@ -269,30 +293,60 @@ client.OnSubscribeCOV += (sender, adr, invokeId, processId, objectId, cancel, co
 
 void NotifyCov(BacnetObjectId objectId)
 {
-    string key = objectId.ToString();
-    List<CovSub> subs;
-    lock (covLock)
+    Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] NotifyCov called for {objectId}");
+    try
     {
-        if (!covSubs.TryGetValue(key, out var raw)) return;
-        raw.RemoveAll(s => DateTime.UtcNow > s.ExpiresAt);
-        subs = raw.ToList();
+        string key = $"{(int)objectId.type}:{objectId.instance}";
+        List<CovSub> subs;
+        lock (covLock)
+        {
+            if (!covSubs.TryGetValue(key, out var raw)) 
+            {
+                Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] NotifyCov({objectId}) aborted: key '{key}' not in covSubs.");
+                return;
+            }
+            raw.RemoveAll(s => DateTime.UtcNow > s.ExpiresAt);
+            subs = raw.ToList();
+        }
+        if (subs.Count == 0) 
+        {
+            Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] NotifyCov({objectId}) aborted: no active subs.");
+            return;
+        }
+
+        if (!storage.TryGetValue(key, out var props) || !props.TryGetValue(BacnetPropertyIds.PROP_PRESENT_VALUE, out var pvVals)) 
+        {
+            Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] NotifyCov({objectId}) aborted: no props.");
+            return;
+        }
+        if (!props.TryGetValue(BacnetPropertyIds.PROP_STATUS_FLAGS, out var sfVals) || sfVals == null || sfVals.Count == 0)
+        {
+            sfVals = new List<BacnetValue> { new(BacnetApplicationTags.BACNET_APPLICATION_TAG_BIT_STRING, BacnetBitString.Parse("0000")) };
+        }
+
+        // Get RELIABILITY (default to 0 = NO_FAULT_DETECTED if not present)
+        if (!props.TryGetValue(BacnetPropertyIds.PROP_RELIABILITY, out var relVals) || relVals == null || relVals.Count == 0)
+        {
+            relVals = new List<BacnetValue> { new(BacnetApplicationTags.BACNET_APPLICATION_TAG_UNSIGNED_INT, 0u) };
+        }
+
+        var covValues = new List<BacnetPropertyValue>
+        {
+            new() { property = new BacnetPropertyReference((uint)BacnetPropertyIds.PROP_PRESENT_VALUE, uint.MaxValue), value = pvVals },
+            new() { property = new BacnetPropertyReference((uint)BacnetPropertyIds.PROP_STATUS_FLAGS,  uint.MaxValue), value = sfVals },
+            new() { property = new BacnetPropertyReference((uint)BacnetPropertyIds.PROP_RELIABILITY,   uint.MaxValue), value = relVals },
+        };
+
+        foreach (var sub in subs)
+        {
+            uint remaining = (uint)Math.Max(0, (sub.ExpiresAt - DateTime.UtcNow).TotalSeconds);
+            client.Notify(sub.Adr, sub.ProcessId, DEVICE_ID, objectId, remaining, sub.Confirmed, covValues);
+            Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] COV-> {objectId}  val={pvVals[0].Value}  to={sub.Adr}");
+        }
     }
-    if (subs.Count == 0) return;
-
-    if (!storage.TryGetValue(key, out var props) || !props.TryGetValue(BacnetPropertyIds.PROP_PRESENT_VALUE, out var pvVals)) return;
-    props.TryGetValue(BacnetPropertyIds.PROP_STATUS_FLAGS, out var sfVals);
-
-    var covValues = new List<BacnetPropertyValue>
+    catch (Exception ex)
     {
-        new() { property = new BacnetPropertyReference((uint)BacnetPropertyIds.PROP_PRESENT_VALUE, uint.MaxValue), value = pvVals },
-        new() { property = new BacnetPropertyReference((uint)BacnetPropertyIds.PROP_STATUS_FLAGS, uint.MaxValue), value = sfVals ?? new List<BacnetValue>() },
-    };
-
-    foreach (var sub in subs)
-    {
-        uint remaining = (uint)Math.Max(0, (sub.ExpiresAt - DateTime.UtcNow).TotalSeconds);
-        client.Notify(sub.Adr, sub.ProcessId, DEVICE_ID, objectId, remaining, sub.Confirmed, covValues);
-        Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] COV-> {objectId}  val={pvVals[0].Value}  to={sub.Adr}");
+        Console.Error.WriteLine($"[{DateTime.Now:HH:mm:ss}] EXCEPTION in NotifyCov for {objectId}: {ex.Message}");
     }
 }
 
@@ -312,7 +366,8 @@ await Task.Run(async () =>
 
         foreach (var oid in allObjectIds)
         {
-            if (!storage.TryGetValue(oid.ToString(), out var props)) continue;
+            string key = $"{(int)oid.type}:{oid.instance}";
+            if (!storage.TryGetValue(key, out var props)) continue;
             if (!props.ContainsKey(BacnetPropertyIds.PROP_PRESENT_VALUE)) continue;
 
             bool changed = false;
@@ -321,18 +376,48 @@ await Task.Run(async () =>
                 float lo = 10, hi = 30;
                 float v = lo + (hi - lo) * (float)(0.5 + 0.5 * Math.Sin(2 * Math.PI * (e + oid.instance * 10) / PERIOD));
                 props[BacnetPropertyIds.PROP_PRESENT_VALUE] = new List<BacnetValue> { new(BacnetApplicationTags.BACNET_APPLICATION_TAG_REAL, v) };
+                
+                // Fault on AI:73 – cycles every 60s (30s fault / 30s normal)
+                if (oid.instance == 73)
+                {
+                    bool isFault = (e % 60) < 30;
+                    var sf = BacnetBitString.Parse(isFault ? "0100" : "0000");
+                    props[BacnetPropertyIds.PROP_STATUS_FLAGS] = new List<BacnetValue> { new(BacnetApplicationTags.BACNET_APPLICATION_TAG_BIT_STRING, sf) };
+                    props[BacnetPropertyIds.PROP_RELIABILITY] = new List<BacnetValue> { new(BacnetApplicationTags.BACNET_APPLICATION_TAG_ENUMERATED, isFault ? 5u : 0u) };
+                }
+                
                 changed = true;
             }
             else if (oid.type is BacnetObjectTypes.OBJECT_BINARY_INPUT or BacnetObjectTypes.OBJECT_BINARY_OUTPUT or BacnetObjectTypes.OBJECT_BINARY_VALUE)
             {
                 uint v = (e + oid.instance * 5) % 20 < 10 ? 1u : 0u;
                 props[BacnetPropertyIds.PROP_PRESENT_VALUE] = new List<BacnetValue> { new(BacnetApplicationTags.BACNET_APPLICATION_TAG_ENUMERATED, v) };
+                
+                // Fault on first 2 BI/BO/BV instances – different phase to AI:73
+                if (oid.instance <= 1)
+                {
+                    bool isFault = (e % 60) >= 30; // Opposite phase: fault 30-60s
+                    var sf = BacnetBitString.Parse(isFault ? "0100" : "0000");
+                    props[BacnetPropertyIds.PROP_STATUS_FLAGS] = new List<BacnetValue> { new(BacnetApplicationTags.BACNET_APPLICATION_TAG_BIT_STRING, sf) };
+                    props[BacnetPropertyIds.PROP_RELIABILITY] = new List<BacnetValue> { new(BacnetApplicationTags.BACNET_APPLICATION_TAG_ENUMERATED, isFault ? 5u : 0u) };
+                }
+                
                 changed = true;
             }
             else if (oid.type is BacnetObjectTypes.OBJECT_MULTI_STATE_INPUT or BacnetObjectTypes.OBJECT_MULTI_STATE_OUTPUT or BacnetObjectTypes.OBJECT_MULTI_STATE_VALUE)
             {
                 uint v = ((uint)(e + oid.instance * 2) / 10 % 3) + 1;
                 props[BacnetPropertyIds.PROP_PRESENT_VALUE] = new List<BacnetValue> { new(BacnetApplicationTags.BACNET_APPLICATION_TAG_UNSIGNED_INT, v) };
+                
+                // Fault on first 2 MSI/MSO/MSV instances
+                if (oid.instance <= 1)
+                {
+                    bool isFault = (e % 120) < 60; // 60s fault / 60s normal (slower cycle)
+                    var sf = BacnetBitString.Parse(isFault ? "0100" : "0000");
+                    props[BacnetPropertyIds.PROP_STATUS_FLAGS] = new List<BacnetValue> { new(BacnetApplicationTags.BACNET_APPLICATION_TAG_BIT_STRING, sf) };
+                    props[BacnetPropertyIds.PROP_RELIABILITY] = new List<BacnetValue> { new(BacnetApplicationTags.BACNET_APPLICATION_TAG_ENUMERATED, isFault ? 5u : 0u) };
+                }
+                
                 changed = true;
             }
             else if (oid.type is BacnetObjectTypes.OBJECT_INTEGER_VALUE)
