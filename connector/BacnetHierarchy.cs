@@ -1,12 +1,12 @@
-// BacnetHierarchy.cs – Desigo Structured View walker
+﻿// BacnetHierarchy.cs – Deziko Structured View walker
 //
 //  BACnet Structured View objects (type 29) carry a PROP_SUBORDINATE_LIST (property 355)
 //  that references child objects.  Children can be other views (sub-folders) or real
 //  data-point objects (AIs, AVs, etc.).  The DEVICE object's PROP_STRUCTURED_OBJECT_LIST
 //  (property 209) lists the top-level views.
 //
-//  This module reads the whole tree in one discovery pass and returns a DesigoTree that
-//  the DesigoProvisioner then materialises as ThingsBoard Assets + Relations.
+//  This module reads the whole tree in one discovery pass and returns a DezikoTree that
+//  the DezikoProvisioner then materialises as ThingsBoard Assets + Relations.
 
 using System;
 using System.Collections.Generic;
@@ -20,16 +20,16 @@ namespace Connector
     // =========================================================================
 
     /// <summary>
-    /// A single node in the Desigo object tree.
+    /// A single node in the Deziko object tree.
     /// View nodes (IsView=true) act as folders; leaf nodes are BACnet data-points.
     /// </summary>
-    class DesigoNode
+    class DezikoNode
     {
         /// <summary>BACnet object identifier (e.g. OBJECT_STRUCTURED_VIEW:4).</summary>
         public BacnetObjectId ObjectId { get; init; }
 
         /// <summary>
-        /// Raw PROP_OBJECT_NAME string, which in Desigo is a full dot-separated path
+        /// Raw PROP_OBJECT_NAME string, which in Deziko is a full dot-separated path
         /// (e.g. "Building.Floor2.Room201.TempSP").
         /// </summary>
         public string ObjectName { get; init; } = "";
@@ -44,7 +44,7 @@ namespace Connector
         /// <summary>Human-readable description from PROP_DESCRIPTION (may be empty).</summary>
         public string Description { get; init; } = "";
 
-        /// <summary>Siemens profile / point-type string from PROP_PROFILE_NAME (may be empty).</summary>
+        /// <summary>profile / point-type string from PROP_PROFILE_NAME (may be empty).</summary>
         public string ProfileName { get; init; } = "";
 
         /// <summary>Engineering unit string from PROP_UNITS (may be empty, for data-point leaves only).</summary>
@@ -54,14 +54,14 @@ namespace Connector
         public bool IsView { get; init; }
 
         /// <summary>Populated only for view nodes (IsView=true).</summary>
-        public List<DesigoNode> Children { get; } = new();
+        public List<DezikoNode> Children { get; } = new();
     }
 
     /// <summary>Extracted hierarchy for one BACnet device.</summary>
-    class DesigoTree
+    class DezikoTree
     {
         /// <summary>Top-level Structured View roots (may be empty if the device has none).</summary>
-        public List<DesigoNode> Roots { get; } = new();
+        public List<DezikoNode> Roots { get; } = new();
     }
 
     // =========================================================================
@@ -79,13 +79,13 @@ namespace Connector
 
         /// <summary>
         /// Walks the OBJECT_STRUCTURED_VIEW tree of <paramref name="deviceId"/> and
-        /// returns the full hierarchy.  Always returns a non-null DesigoTree; Roots is
+        /// returns the full hierarchy.  Always returns a non-null DezikoTree; Roots is
         /// empty when the device has no Structured View objects.
         /// </summary>
-        public static DesigoTree Walk(
+        public static DezikoTree Walk(
             BacnetClient client, BacnetAddress address, uint deviceId)
         {
-            var tree    = new DesigoTree();
+            var tree    = new DezikoTree();
             var visited = new HashSet<BacnetObjectId>();
 
             // Read PROP_STRUCTURED_OBJECT_LIST from the Device object
@@ -109,7 +109,7 @@ namespace Connector
 
         // ── Recursive view walker ─────────────────────────────────────────────
 
-        static DesigoNode? WalkView(
+        static DezikoNode? WalkView(
             BacnetClient client, BacnetAddress address,
             BacnetObjectId viewId,
             HashSet<BacnetObjectId> visited,
@@ -130,7 +130,7 @@ namespace Connector
                                                 PropProfileName)
                                  ?? "";
 
-            var node = new DesigoNode
+            var node = new DezikoNode
             {
                 ObjectId    = viewId,
                 ObjectName  = objectName,
@@ -165,7 +165,7 @@ namespace Connector
             return node;
         }
 
-        static DesigoNode? ReadLeafNode(
+        static DezikoNode? ReadLeafNode(
             BacnetClient client, BacnetAddress address,
             BacnetObjectId oid,
             HashSet<BacnetObjectId> visited)
@@ -187,7 +187,7 @@ namespace Connector
             // PROP_UNITS is an enum value – read as raw and convert to string
             string units = ReadUnitsProp(client, address, oid);
 
-            return new DesigoNode
+            return new DezikoNode
             {
                 ObjectId    = oid,
                 ObjectName  = objectName,

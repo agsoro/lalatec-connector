@@ -1,4 +1,4 @@
-# Testing Guide
+﻿# Testing Guide
 
 This document explains the end-to-end test environment included in the `testing/` folder.
 One `docker compose up --build` from the repo root starts the entire stack.
@@ -83,11 +83,11 @@ Values use float32 big-endian encoding, matching the real Janitza UMG-604/605-PR
 |-----------------|-------------------------------|
 | Connection      | `172.17.0.1:47808`            |
 | Device ID       | `1001`                        |
-| Vendor          | `7` (Siemens AG)              |
+| Vendor          | `7` (Lalatec AG)              |
 | Model           | `PXC001-E.D`                  |
 | COV             | Enabled                       |
 
-**Simulated objects (Desigo naming convention):**
+**Simulated objects (Deziko naming convention):**
 
 | Object          | Name                  | Description                          | Behaviour                     |
 |-----------------|-----------------------|--------------------------------------|-------------------------------|

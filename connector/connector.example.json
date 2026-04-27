@@ -1,4 +1,4 @@
-{
+﻿{
   // Copy this file to connector.json and fill in your values.
 
   "thingsboard": {
@@ -178,7 +178,7 @@
           "refreshIntervalMinutes": 60
         },
 
-        // ── Desigo Structured View hierarchy (opt-in) ──────────────────────
+        // ── Deziko Structured View hierarchy (opt-in) ──────────────────────
         "hierarchy": {
           "enabled":   true,
           "assetType": "BACnet Node"
@@ -211,7 +211,7 @@
       // connection and forwards write commands to the BACnet device.
       //
       // Write-back targets any object discovered with PROP_PRIORITY_ARRAY
-      // (commandable objects — AO, AV, BO, BV, MO, MV on Siemens Desigo).
+      // (commandable objects — AO, AV, BO, BV, MO, MV on Deziko).
       // Read-only sensor inputs (AI, BI, MI) are detected and rejected safely.
       //
       // RPC payload convention:

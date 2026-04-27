@@ -1,7 +1,7 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <!--
-  Siemens Desigo PXC001-style BACnet device
-  Device instance 1001, Vendor 7 (Siemens AG)
+  Deziko PXC001-style BACnet device
+  Device instance 1001, Vendor 7 (Lalatec AG)
 
   Loaded by DeviceStorage.Load() in the BacnetSim application.
   Values tagged with (rw) are updated at runtime by the simulation loop.
@@ -11,11 +11,11 @@
   <!-- ── Device object ────────────────────────────────────────────────────── -->
   <Object Type="OBJECT_DEVICE" Instance="1001">
     <Property Id="PROP_OBJECT_IDENTIFIER"             Tag="BACNET_APPLICATION_TAG_OBJECT_ID"         Value="OBJECT_DEVICE:1001" />
-    <Property Id="PROP_OBJECT_NAME"                   Tag="BACNET_APPLICATION_TAG_CHARACTER_STRING"  Value="Siemens-Desigo-Sim" />
+    <Property Id="PROP_OBJECT_NAME"                   Tag="BACNET_APPLICATION_TAG_CHARACTER_STRING"  Value="Lalatec-Deziko-Sim" />
     <Property Id="PROP_OBJECT_TYPE"                   Tag="BACNET_APPLICATION_TAG_ENUMERATED"        Value="8" />
-    <Property Id="PROP_DESCRIPTION"                   Tag="BACNET_APPLICATION_TAG_CHARACTER_STRING"  Value="Simulated Desigo CC AHU Controller" />
+    <Property Id="PROP_DESCRIPTION"                   Tag="BACNET_APPLICATION_TAG_CHARACTER_STRING"  Value="Simulated Deziko CC AHU Controller" />
     <Property Id="PROP_VENDOR_IDENTIFIER"             Tag="BACNET_APPLICATION_TAG_UNSIGNED_INT"      Value="7" />
-    <Property Id="PROP_VENDOR_NAME"                   Tag="BACNET_APPLICATION_TAG_CHARACTER_STRING"  Value="Siemens AG" />
+    <Property Id="PROP_VENDOR_NAME"                   Tag="BACNET_APPLICATION_TAG_CHARACTER_STRING"  Value="Lalatec AG" />
     <Property Id="PROP_MODEL_NAME"                    Tag="BACNET_APPLICATION_TAG_CHARACTER_STRING"  Value="PXC001-E.D" />
     <Property Id="PROP_FIRMWARE_REVISION"             Tag="BACNET_APPLICATION_TAG_CHARACTER_STRING"  Value="V6.00.340" />
     <Property Id="PROP_APPLICATION_SOFTWARE_VERSION"  Tag="BACNET_APPLICATION_TAG_CHARACTER_STRING"  Value="V6.00" />
@@ -231,7 +231,7 @@
     <Property Id="PROP_RELINQUISH_DEFAULT"   Tag="BACNET_APPLICATION_TAG_UNSIGNED_INT"      Value="1" />
   </Object>
 
-  <!-- ── Structured Views (Desigo hierarchy) ───────────────────────────── -->
+  <!-- ── Structured Views (Deziko hierarchy) ───────────────────────────── -->
   <!-- SV:1  root folder – represents the AHU controller                         -->
   <Object Type="OBJECT_STRUCTURED_VIEW" Instance="1">
     <Property Id="PROP_OBJECT_IDENTIFIER" Tag="BACNET_APPLICATION_TAG_OBJECT_ID"         Value="OBJECT_STRUCTURED_VIEW:1" />

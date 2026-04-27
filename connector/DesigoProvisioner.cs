@@ -1,4 +1,4 @@
-// DesigoProvisioner.cs – materialises a DesigoTree into ThingsBoard Assets + Relations
+﻿// DezikoProvisioner.cs – materialises a DezikoTree into ThingsBoard Assets + Relations
 //
 //  Model produced in ThingsBoard:
 //
@@ -12,7 +12,7 @@
 //    bacnet_type        – short object type alias (ai, av, …) or "view"
 //    bacnet_instance    – numeric instance (for data-point leaves)
 //    description        – PROP_DESCRIPTION
-//    profile_name       – PROP_PROFILE_NAME (Siemens-specific)
+//    profile_name       – PROP_PROFILE_NAME (specific)
 //    units              – PROP_UNITS (data-point leaves only)
 //
 //  The run is fully idempotent: each asset and relation is created only if missing.
@@ -25,7 +25,7 @@ using System.Threading.Tasks;
 
 namespace Connector
 {
-    class DesigoProvisioner
+    class DezikoProvisioner
     {
         /// <summary>
         /// Walks the <paramref name="tree"/> depth-first and materialises each node as a
@@ -35,7 +35,7 @@ namespace Connector
         /// for every leaf data-point asset, so the caller can post telemetry directly to assets.
         /// </summary>
         public async Task<Dictionary<string, string>> ProvisionAsync(
-            DesigoTree     tree,
+            DezikoTree     tree,
             ThingsBoardApi api,
             string         tbDeviceId,
             string         assetType,
@@ -69,7 +69,7 @@ namespace Connector
         // ── Recursive node handler ────────────────────────────────────────────
 
         async Task ProvisionNodeAsync(
-            DesigoNode     node,
+            DezikoNode     node,
             string?        parentAssetId,
             string?        parentName,
             ThingsBoardApi api,
@@ -83,7 +83,7 @@ namespace Connector
 
             // The TB asset name is the last dot-segment; it must be unique within a
             // given level of the tree.  If two sibling views share the same short name
-            // (rare in Desigo but possible), we append the instance number.
+            // (rare in Deziko but possible), we append the instance number.
             string assetName = node.ShortName;
 
             string assetId = await api.EnsureAssetAsync(assetName, assetType);

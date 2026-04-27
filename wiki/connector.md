@@ -1,4 +1,4 @@
-# lalatec-connector — Technical Documentation
+﻿# lalatec-connector — Technical Documentation
 
 > **Generated:** 2026-04-24  
 > **Target:** `c:\src\thingsboard\lalatec-connector`  
@@ -537,7 +537,7 @@ During object discovery, the connector probes `PROP_PRIORITY_ARRAY` for every ou
 | AO, AV, BO, BV, MO, MV | Yes (if `PROP_PRIORITY_ARRAY` present) |
 | AI, BI, MI | Never probed — always read-only |
 
-This matches the Siemens Desigo PXC/CC convention: operator-settable setpoints are AV/AO objects with priority arrays; sensor readings are AI objects without.
+This matches the Deziko PXC/CC convention: operator-settable setpoints are AV/AO objects with priority arrays; sensor readings are AI objects without.
 
 A write to a non-commandable object is rejected with a clear error message. The field device is never contacted.
 
@@ -584,9 +584,9 @@ Body: { "method": "setValue", "params": { "key": "…", "value": … }, "timeout
 
 ---
 
-## 13. Desigo hierarchy → ThingsBoard Assets
+## 13. Deziko hierarchy → ThingsBoard Assets
 
-Siemens Desigo PXC/PXC5/PXC7 controllers expose their engineering tree via **BACnet Structured View objects** (`OBJECT_STRUCTURED_VIEW`, type 29).  
+Deziko PXC/PXC5/PXC7 controllers expose their engineering tree via **BACnet Structured View objects** (`OBJECT_STRUCTURED_VIEW`, type 29).  
 The connector can walk this tree and materialise it as a **ThingsBoard Asset hierarchy** with `"Contains"` relations.
 
 ### 13.1 How it works
@@ -606,7 +606,7 @@ Properties read per node:
 |---|---|
 | `PROP_OBJECT_NAME` | Full dot-path (e.g. `Building.Floor2.Room201.TempSP`); last segment = Asset name |
 | `PROP_DESCRIPTION` | Human-readable label → `description` attribute |
-| `PROP_PROFILE_NAME` | Siemens point-type string → `profile_name` attribute |
+| `PROP_PROFILE_NAME` | point-type string → `profile_name` attribute |
 | `PROP_UNITS` | Engineering unit (for data-point leaves) → `units` attribute |
 
 ### 13.2 ThingsBoard model produced
@@ -634,7 +634,7 @@ Every Asset gets the following **SERVER_SCOPE attributes**:
 
 ```jsonc
 "hierarchy": {
-  "enabled":   true,        // false (or omit block) to disable for non-Desigo devices
+  "enabled":   true,        // false (or omit block) to disable for non-Deziko devices
   "assetType": "BACnet Node"  // TB asset type string; choose to match your naming convention
 }
 ```
@@ -652,7 +652,7 @@ Startup
   └─ [background Task per device, hierarchy.enabled = true]
         │
         ├─ Wait for first poll cycle → BACnet discovery runs → Structured Views walked
-        └─ DesigoProvisioner.ProvisionAsync()
+        └─ DezikoProvisioner.ProvisionAsync()
               ├─ EnsureAssetAsync() for each node (idempotent)
               ├─ SetAssetAttributesAsync() with description / path / type
               └─ EnsureRelationAsync() for parent→child and leaf→device
@@ -664,8 +664,8 @@ The provisioner runs **once** after startup.  Provisioning is fully **idempotent
 
 | File | Role |
 |---|---|
-| `BacnetHierarchy.cs` | Walks Structured View tree → `DesigoTree` |
-| `DesigoProvisioner.cs` | Materialises `DesigoTree` into TB Assets + Relations |
+| `BacnetHierarchy.cs` | Walks Structured View tree → `DezikoTree` |
+| `DezikoProvisioner.cs` | Materialises `DezikoTree` into TB Assets + Relations |
 | `ThingsBoardApi.cs` | `EnsureAssetAsync`, `EnsureRelationAsync`, `SetAssetAttributesAsync` |
 | `BacnetReader.cs` | Stores tree in `DiscoveryState.Tree`; exposes `GetDiscoveredTree()` |
 | `Program.cs` | Launches background provisioning job |
@@ -674,8 +674,8 @@ The provisioner runs **once** after startup.  Provisioning is fully **idempotent
 
 If the device does not expose any Structured View objects (e.g. generic BACnet devices, Modbus, etc.):
 
-- `PROP_STRUCTURED_OBJECT_LIST` returns empty → `DesigoTree.Roots` is empty.
+- `PROP_STRUCTURED_OBJECT_LIST` returns empty → `DezikoTree.Roots` is empty.
 - The provisioner logs `[Hierarchy] No Structured View roots – nothing to provision.` and exits cleanly.
 - Normal polling continues unaffected.
-- Leave `hierarchy.enabled` as `false` (or omit the block) for non-Desigo devices.
+- Leave `hierarchy.enabled` as `false` (or omit the block) for non-Deziko devices.
 

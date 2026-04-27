@@ -1,4 +1,4 @@
-// Config.cs – JSON model, mirrors connector.json
+﻿// Config.cs – JSON model, mirrors connector.json
 using System.Collections.Generic;
 using System.Text.Json.Serialization;
 
@@ -120,7 +120,7 @@ namespace Connector
         [property: JsonPropertyName("discovery")]      BacnetDiscoveryConfig  Discovery,
 
         /// <summary>
-        /// Optional Desigo / Structured-View hierarchy extraction.
+        /// Optional Deziko / Structured-View hierarchy extraction.
         /// Enabled only when this block is present and <c>enabled</c> is true.
         /// </summary>
         [property: JsonPropertyName("hierarchy")]      BacnetHierarchyConfig? Hierarchy = null,
@@ -161,7 +161,7 @@ namespace Connector
         [property: JsonPropertyName("attributePollRatePerMinute")] int  AttributePollRatePerMinute = 5
     );
 
-    // ── Desigo hierarchy config ────────────────────────────────────────────────
+    // ── Deziko hierarchy config ────────────────────────────────────────────────
 
     /// <summary>
     /// Controls whether the connector walks OBJECT_STRUCTURED_VIEW objects on the

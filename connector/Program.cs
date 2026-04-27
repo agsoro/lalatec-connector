@@ -1,4 +1,4 @@
-// Program.cs – entry point; wires everything together
+﻿// Program.cs – entry point; wires everything together
 //
 //  ThingsBoard publish topics:
 //    Telemetry   →  v1/devices/me/telemetry    (timestamped time-series)
@@ -123,7 +123,7 @@ namespace Connector
                 }
             }
 
-            // ── Hierarchy background provisioning (Desigo Structured Views) ─────
+            // ── Hierarchy background provisioning (Deziko Structured Views) ─────
             // Fires once after startup as a background Task for each BACnet device
             // that has hierarchy.enabled = true.  It waits for the first discovery
             // (signalled by BacnetReadResult.HierarchyDirty) then provisions assets.
@@ -148,7 +148,7 @@ namespace Connector
                     {
                         // Wait until the first ReadFull() sets HierarchyDirty, which
                         // happens on the first poll cycle.  Poll every 5 s here.
-                        DesigoTree? tree = null;
+                        DezikoTree? tree = null;
                         while (!cts.Token.IsCancellationRequested)
                         {
                             tree = bacnetReader.GetDiscoveredTree(capturedDevice.Name);
@@ -174,7 +174,7 @@ namespace Connector
                         Console.WriteLine(
                             $"  [Hierarchy] Provisioning asset tree for '{capturedDevice.Name}' " +
                             $"(device UUID={tbDeviceId}, roots={tree.Roots.Count})…");
-                        var provisioner = new DesigoProvisioner();
+                        var provisioner = new DezikoProvisioner();
                         var leafMap = await provisioner.ProvisionAsync(
                             tree, tbApi, tbDeviceId,
                             capturedDevice.Bacnet!.Hierarchy!.AssetType,

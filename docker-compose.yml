@@ -1,4 +1,4 @@
-# docker-compose.yml  (repo root)
+﻿# docker-compose.yml  (repo root)
 #
 # Full end-to-end test stack:
 #
@@ -15,7 +15,7 @@
 #   3. modbus-sim        – Janitza-style Modbus TCP server (port 502)
 #                          Slave 1: drifting power, accumulating energy.
 #
-#   4. bacnet-sim        – Siemens Desigo-style BACnet/IP device (port 47808 UDP)
+#   4. bacnet-sim        – Deziko-style BACnet/IP device (port 47808 UDP)
 #                          Device 1001 with analog, binary, multi-state objects.
 #                          Full COV subscribe / notify support.
 #

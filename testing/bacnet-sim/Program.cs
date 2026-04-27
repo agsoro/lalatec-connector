@@ -1,4 +1,4 @@
-// Program.cs – BACnet/IP simulator (Siemens Desigo-style, device 1001)
+﻿// Program.cs – BACnet/IP simulator (Deziko-style, device 1001)
 
 using System;
 using System.Collections.Generic;
@@ -50,7 +50,7 @@ var allObjectIds = new BacnetObjectId[]
     new(BacnetObjectTypes.OBJECT_STRUCTURED_VIEW,    6),  // Room101
 };
 
-// ── Desigo hierarchy ──────────────────────────────────────────────────────────
+// ── Deziko hierarchy ──────────────────────────────────────────────────────────
 const BacnetPropertyIds PROP_STRUCTURED_OBJECT_LIST = (BacnetPropertyIds)209;
 const BacnetPropertyIds PROP_SUBORDINATE_LIST        = (BacnetPropertyIds)355;
 
@@ -394,7 +394,7 @@ void NotifyCov(BacnetObjectId objectId)
 }
 
 client.Start();
-Console.WriteLine($"=== BACnet/IP Simulator  device={DEVICE_ID}  vendor=7 (Siemens AG) ===");
+Console.WriteLine($"=== BACnet/IP Simulator  device={DEVICE_ID}  vendor=7 (Lalatec AG) ===");
 Console.WriteLine($"Listening on UDP 0.0.0.0:{PORT}  |  objects={storage.Objects.Length}  |  svRoots={svRoots.Length}");
 client.Iam(DEVICE_ID, BacnetSegmentations.SEGMENTATION_NONE, null, null);
 

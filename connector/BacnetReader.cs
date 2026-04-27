@@ -1,4 +1,4 @@
-// BacnetReader.cs – BACnet/IP device reader with full object discovery and filtering
+﻿// BacnetReader.cs – BACnet/IP device reader with full object discovery and filtering
 //
 //  Discovery flow (run on startup and optionally on a timer):
 //    1. Unicast Who-Is  →  I-Am  →  resolves BacnetAddress
@@ -385,8 +385,8 @@ namespace Connector
 
         /// <summary>
         /// Returns true for BACnet object types that always have a priority array
-        /// and are therefore operator-writable (commandable). Matches the Siemens
-        /// Desigo convention: AO, AV, BO, BV, MO, MV are setpoints/outputs;
+        /// and are therefore operator-writable (commandable). Matches the 
+        /// Deziko convention: AO, AV, BO, BV, MO, MV are setpoints/outputs;
         /// AI, BI, MI are sensor inputs and are never commandable.
         /// </summary>
         static bool IsCommandableType(BacnetObjectTypes t) => t is
@@ -588,7 +588,7 @@ namespace Connector
             public DateTime               LastDiscovery   { get; set; } = DateTime.MinValue;
             public List<BacnetObjectInfo> CachedObjects   { get; set; } = new();
             /// <summary>Populated after discovery when hierarchy extraction is enabled.</summary>
-            public DesigoTree?            Tree            { get; set; }
+            public DezikoTree?            Tree            { get; set; }
 
             // ── COV mode ──────────────────────────────────────────────────────
             /// <summary>Long-lived client kept open for the lifetime of the process (COV mode).</summary>
@@ -618,10 +618,10 @@ namespace Connector
         }
 
         /// <summary>
-        /// Returns the <see cref="DesigoTree"/> produced during the last discovery run for this
+        /// Returns the <see cref="DezikoTree"/> produced during the last discovery run for this
         /// device, or null when no tree has been extracted yet (hierarchy disabled or not yet run).
         /// </summary>
-        public DesigoTree? GetDiscoveredTree(string deviceName)
+        public DezikoTree? GetDiscoveredTree(string deviceName)
         {
             lock (_stateLock)
                 return _stateByDevice.TryGetValue(deviceName, out var s) ? s.Tree : null;
