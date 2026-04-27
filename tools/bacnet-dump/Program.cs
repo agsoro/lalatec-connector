@@ -311,14 +311,23 @@ else if (jsonOutput)
 else
     DumpTable(client, address, objects, propsToRead);
 
-Info($"Done. Objects dumped: {objects.Count}");
+    Info($"Done. Objects dumped: {objects.Count}");
 
-if (AnomalyTracker.Items.Count > 0)
-{
-    Console.Error.WriteLine("\n=== ANOMALY SUMMARY ===");
-    foreach (var a in AnomalyTracker.Items.Distinct())
-        Console.Error.WriteLine($"[!] {a}");
-    Console.Error.WriteLine("========================\n");
+    if (AnomalyTracker.Items.Count > 0)
+    {
+        Console.Error.WriteLine("\n=== ANOMALY SUMMARY ===");
+        
+        // Count how many objects supported dynamic property lists
+        var dynCount = AnomalyTracker.Items.Count(a => a.Contains("supports dynamic property list"));
+        if (dynCount > 0)
+            Console.Error.WriteLine($"[*] {dynCount} object(s) provided a dynamic property list (proprietary props captured).");
+
+        // Show actual errors/aborts
+        foreach (var a in AnomalyTracker.Items.Distinct().Where(a => !a.Contains("supports dynamic property list")))
+            Console.Error.WriteLine($"[!] {a}");
+            
+        Console.Error.WriteLine("========================\n");
+    }
 }
 
 client.Dispose();
