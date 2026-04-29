@@ -53,7 +53,7 @@ namespace Connector
                 Console.WriteLine($"  [SunSpec] Discovering models on '{deviceName}'...");
                 ushort? baseAddr = FindBaseAddress(master, slaveId);
                 if (baseAddr == null)
-                    throw new Exception($"Could not find SunSpec 'SunS' marker on {deviceName} at 40000, 0, or 50000.");
+                    throw new Exception($"Could find SunSpec 'SunS' marker on {deviceName} at 40000, 0, or 50000.");
 
                 var models = new Dictionary<ushort, ModelInfo>();
                 ushort currentAddr = (ushort)(baseAddr.Value + 2);
