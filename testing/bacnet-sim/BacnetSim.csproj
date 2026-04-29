@@ -5,6 +5,7 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>BacnetSim</AssemblyName>
+    <Version>1.2.3</Version>
   </PropertyGroup>
   <ItemGroup>
     <!-- Same BACnet stack as the connector (ela-compil / YABE) -->

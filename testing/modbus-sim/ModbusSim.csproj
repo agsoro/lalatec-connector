@@ -5,6 +5,7 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>ModbusSim</AssemblyName>
+    <Version>1.2.3</Version>
   </PropertyGroup>
   <ItemGroup>
     <!-- Same NModbus version as the connector so wire encoding is identical -->

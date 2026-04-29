@@ -40,7 +40,8 @@ var network = factory.CreateSlaveNetwork(listener);
 var slave   = factory.CreateSlave(1);          // slave ID 1
 network.AddSlave(slave);
 
-Console.WriteLine("=== Modbus TCP Simulator (Janitza UMG-604) ===");
+var version = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version;
+Console.WriteLine($"=== Modbus TCP Simulator v{version?.Major}.{version?.Minor}.{version?.Build} (Janitza UMG-604) ===");
 Console.WriteLine($"Listening on 0.0.0.0:502  slave=1");
 Console.WriteLine($"Initial import = {importWh / 1000:F1} kWh");
 Console.WriteLine($"Power sine  {POWER_MIN_W/1000:F1}–{POWER_MAX_W/1000:F1} kW  period={POWER_PERIOD_S:F0} s");

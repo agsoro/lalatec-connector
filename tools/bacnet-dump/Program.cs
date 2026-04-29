@@ -41,6 +41,8 @@ const BacnetPropertyIds PROP_SUBORDINATE_LIST        = (BacnetPropertyIds)355; /
 
 string? outFile = null;
 
+Console.OutputEncoding = System.Text.Encoding.UTF8;
+
 // ─── Parse arguments ─────────────────────────────────────────────────────────
 
 if (args.Length == 0 || args[0] is "-h" or "--help")
@@ -113,7 +115,8 @@ var transport = new BacnetIpUdpProtocolTransport(localPort, useExclusivePort: tr
 var client    = new BacnetClient(transport);
 client.Start();
 
-Info($"BACnet/IP dump  target={ip}:{remPort}  filter=\"{filter}\"");
+var version = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version;
+Info($"BACnet/IP dump v{version?.Major}.{version?.Minor}.{version?.Build}  target={ip}:{remPort}  filter=\"{filter}\"");
 
 // ─── Device discovery (Who-Is / I-Am) ────────────────────────────────────────
 //

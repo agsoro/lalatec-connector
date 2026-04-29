@@ -7,6 +7,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>Connector</RootNamespace>
     <AssemblyName>Connector</AssemblyName>
+    <Version>1.2.3</Version>
   </PropertyGroup>
 
   <ItemGroup>

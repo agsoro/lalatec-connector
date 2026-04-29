@@ -6,6 +6,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>bacnet-dump</AssemblyName>
     <RootNamespace>BacnetDump</RootNamespace>
+    <Version>1.2.3</Version>
   </PropertyGroup>
   <ItemGroup>
     <!-- Same BACnet stack as the connector and bacnet-sim (ela-compil / YABE) -->

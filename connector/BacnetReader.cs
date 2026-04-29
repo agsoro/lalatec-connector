@@ -25,11 +25,69 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using System.Globalization;
 using System.Threading.Tasks;
+using System.Collections.Concurrent;
 
 namespace Connector
 {
-    using Telemetry  = Dictionary<string, double>;
+    using Telemetry = Dictionary<string, double>;
     using Attributes = Dictionary<string, string>;
+
+    /// <summary>
+    /// Conflates high-frequency telemetry updates into batches to reduce MQTT load.
+    /// Implementation of Future Development 1.2.
+    /// </summary>
+    class TelemetryConflator : IDisposable
+    {
+        private readonly Func<Telemetry, Task> _publisher;
+        private readonly ConcurrentDictionary<string, double> _buffer = new();
+        private readonly System.Threading.Timer _timer;
+        private int _isFlushing = 0;
+
+        public TelemetryConflator(Func<Telemetry, Task> publisher, int intervalMs = 250)
+        {
+            _publisher = publisher;
+            _timer = new System.Threading.Timer(OnTimer, null, intervalMs, intervalMs);
+        }
+
+        public void Add(Telemetry data)
+        {
+            foreach (var kv in data)
+                _buffer[kv.Key] = kv.Value;
+        }
+
+        private void OnTimer(object? state)
+        {
+            if (Interlocked.CompareExchange(ref _isFlushing, 1, 0) != 0) return;
+            try
+            {
+                if (_buffer.IsEmpty) return;
+                var snapshot = new Telemetry();
+                foreach (var key in _buffer.Keys)
+                    if (_buffer.TryRemove(key, out double val))
+                        snapshot[key] = val;
+
+                if (snapshot.Count > 0)
+                {
+                    // Fire-and-forget publish with error handling
+                    _ = Task.Run(async () =>
+                    {
+                        try { await _publisher(snapshot); }
+                        catch (Exception ex) { Console.Error.WriteLine($"  [Conflator] Publish failed: {ex.Message}"); }
+                    });
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"  [Conflator] Flush error: {ex.Message}");
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _isFlushing, 0);
+            }
+        }
+
+        public void Dispose() => _timer.Dispose();
+    }
 
     // =========================================================================
     //  Result returned by BacnetReader – extends the base Telemetry with
@@ -37,10 +95,10 @@ namespace Connector
     // =========================================================================
     class BacnetReadResult
     {
-        public Telemetry  Telemetry     { get; } = new();
-        public Attributes Attributes   { get; } = new();
+        public Telemetry Telemetry { get; } = new();
+        public Attributes Attributes { get; } = new();
         /// <summary>True on the first poll after a (re-)discovery. Signals the background job to re-provision the hierarchy.</summary>
-        public bool       HierarchyDirty { get; set; }
+        public bool HierarchyDirty { get; set; }
     }
 
     // =========================================================================
@@ -48,13 +106,13 @@ namespace Connector
     // =========================================================================
     record BacnetObjectInfo(
         BacnetObjectId ObjectId,
-        string         ObjectName,           // technical path (from PROP_OBJECT_NAME)
-        List<string>   NamingPath,           // friendly path segments (from prop 4397)
-        string         NameExtension = "",    // friendly alias (from prop 4438)
-        string         Description   = "",   // from PROP_DESCRIPTION
-        bool           Commandable   = false, // true when PROP_PRIORITY_ARRAY present
-        int            Category      = -1,    // from PROP_CATEGORY (4941)
-        BacnetObjectId? LogObjectId  = null   // from PROP_TREND_LOG_REFERENCE (4452)
+        string ObjectName,           // technical path (from PROP_OBJECT_NAME)
+        List<string> NamingPath,           // friendly path segments (from prop 4397)
+        string NameExtension = "",    // friendly alias (from prop 4438)
+        string Description = "",   // from PROP_DESCRIPTION
+        bool Commandable = false, // true when PROP_PRIORITY_ARRAY present
+        int Category = -1,    // from PROP_CATEGORY (4941)
+        BacnetObjectId? LogObjectId = null   // from PROP_TREND_LOG_REFERENCE (4452)
     )
     {
         /// <summary>Sanitised key prefix used in ThingsBoard, e.g. "ai_0_tsu".</summary>
@@ -67,32 +125,32 @@ namespace Connector
                 // 2. NameExtension (prop 4438)
                 // 3. Last segment of ObjectName (technical path)
                 string friendly = NamingPath.Any() ? NamingPath.Last() : NameExtension;
-                
+
                 string baseName = !string.IsNullOrWhiteSpace(friendly)
                     ? friendly
                     : (ObjectName.Contains('.')
                         ? ObjectName[(ObjectName.LastIndexOf('.') + 1)..]
                         : ObjectName);
- 
+
                 return $"{ShortTypeName(ObjectId.type)}_{ObjectId.instance}_" + Sanitise(baseName);
             }
         }
 
         public static string ShortTypeName(BacnetObjectTypes t) => t switch
         {
-            BacnetObjectTypes.OBJECT_ANALOG_INPUT        => "ai",
-            BacnetObjectTypes.OBJECT_ANALOG_OUTPUT       => "ao",
-            BacnetObjectTypes.OBJECT_ANALOG_VALUE        => "av",
-            BacnetObjectTypes.OBJECT_BINARY_INPUT        => "bi",
-            BacnetObjectTypes.OBJECT_BINARY_OUTPUT       => "bo",
-            BacnetObjectTypes.OBJECT_BINARY_VALUE        => "bv",
-            BacnetObjectTypes.OBJECT_MULTI_STATE_INPUT   => "mi",
-            BacnetObjectTypes.OBJECT_MULTI_STATE_OUTPUT  => "mo",
-            BacnetObjectTypes.OBJECT_MULTI_STATE_VALUE   => "mv",
-            BacnetObjectTypes.OBJECT_INTEGER_VALUE       => "iv",
-            BacnetObjectTypes.OBJECT_DEVICE              => "dev",
-            (BacnetObjectTypes)264                       => "sys",
-            _                                            => t.ToString().Replace("OBJECT_", "").ToLower(),
+            BacnetObjectTypes.OBJECT_ANALOG_INPUT => "ai",
+            BacnetObjectTypes.OBJECT_ANALOG_OUTPUT => "ao",
+            BacnetObjectTypes.OBJECT_ANALOG_VALUE => "av",
+            BacnetObjectTypes.OBJECT_BINARY_INPUT => "bi",
+            BacnetObjectTypes.OBJECT_BINARY_OUTPUT => "bo",
+            BacnetObjectTypes.OBJECT_BINARY_VALUE => "bv",
+            BacnetObjectTypes.OBJECT_MULTI_STATE_INPUT => "mi",
+            BacnetObjectTypes.OBJECT_MULTI_STATE_OUTPUT => "mo",
+            BacnetObjectTypes.OBJECT_MULTI_STATE_VALUE => "mv",
+            BacnetObjectTypes.OBJECT_INTEGER_VALUE => "iv",
+            BacnetObjectTypes.OBJECT_DEVICE => "dev",
+            (BacnetObjectTypes)264 => "sys",
+            _ => t.ToString().Replace("OBJECT_", "").ToLower(),
         };
 
         static string Sanitise(string name) =>
@@ -109,15 +167,15 @@ namespace Connector
     // =========================================================================
     class BacnetReader : IDeviceReader, IDeviceWriter
     {
-        public string DriverName => "BACnet/IP";
+        public string DriverName => "BACnet";
 
         // Per-device discovery state (keyed by device name so multiple devices work)
         readonly Dictionary<string, DiscoveryState> _stateByDevice = new();
-        readonly object                              _stateLock     = new();
+        readonly object _stateLock = new();
 
         const BacnetPropertyIds PropNameExtension = (BacnetPropertyIds)4438;
-        const BacnetPropertyIds PropNamingPath    = (BacnetPropertyIds)4397;
-        const BacnetPropertyIds PropCategory4941  = (BacnetPropertyIds)4941;
+        const BacnetPropertyIds PropNamingPath = (BacnetPropertyIds)4397;
+        const BacnetPropertyIds PropCategory4941 = (BacnetPropertyIds)4941;
         const BacnetPropertyIds PropTrendLogReference = (BacnetPropertyIds)4452;
 
         // =====================================================================
@@ -157,13 +215,14 @@ namespace Connector
             if (needsDiscovery)
             {
                 Console.WriteLine($"  [BACnet] Discovering objects on {device.Name}…");
-                var all      = DiscoverObjects(client, address, device.BacnetDeviceId.Value, cfg);
+                var all = DiscoverObjects(client, address, device.BacnetDeviceId.Value, cfg);
                 var filtered = ApplyFilter(client, address, all, cfg.Filter);
-                state.CachedObjects    = filtered;
-                state.LastDiscovery    = DateTime.UtcNow;
-                state.DiscoveryDone    = true;
-                state.AttributesSent   = false;   // re-send attributes after rediscovery
-                state.HierarchyDirty   = true;    // signal background provisioner
+                state.CachedObjects = filtered;
+                state.LastDiscovery = DateTime.UtcNow;
+                state.DiscoveryDone = true;
+                state.AttributesSent = false;   // re-send attributes after rediscovery
+                state.HierarchyDirty = true;    // signal background provisioner
+                state.HierarchyReady = false;   // wait for background job to finish provisioning before alarms
 
                 // Walk Structured View hierarchy when enabled
                 if (cfg.Hierarchy?.Enabled == true)
@@ -180,9 +239,10 @@ namespace Connector
                 // ── Sync Trend Logs (Historical Backfill) ─────────────────────
                 if (tbApi != null)
                 {
-                    _ = Task.Run(async () => {
+                    _ = Task.Run(async () =>
+                    {
                         // Wait a bit for hierarchy to be provisioned so Assets exist
-                        await Task.Delay(5000); 
+                        await Task.Delay(5000);
                         await SyncTrendLogsAsync(client, address, state, tbApi, device);
                     });
                 }
@@ -194,7 +254,7 @@ namespace Connector
             // ── Read properties ───────────────────────────────────────────────
             var result = new BacnetReadResult();
 
-            var telPropIds  = ParsePropertyIds(cfg.Properties.Telemetry);
+            var telPropIds = ParsePropertyIds(cfg.Properties.Telemetry);
             var attrPropIds = !state.AttributesSent
                               ? ParsePropertyIds(cfg.Properties.Attributes)
                               : Array.Empty<BacnetPropertyIds>();
@@ -235,7 +295,7 @@ namespace Connector
                 if (allPropIds.Contains(BacnetPropertyIds.PROP_STATUS_FLAGS) && values.TryGetValue(BacnetPropertyIds.PROP_STATUS_FLAGS, out var stRaw) && stRaw is BacnetBitString stBs)
                 {
                     ExpandStatusFlags(result.Telemetry, obj.KeyPrefix + "_status", stBs);
-                    
+
                     // ── Diagnostic Alarms ─────────────────────────────────────
                     if (tbApi != null)
                     {
@@ -250,8 +310,8 @@ namespace Connector
             // Propagate the dirty flag once per discovery cycle
             if (state.HierarchyDirty)
             {
-                result.HierarchyDirty  = true;
-                state.HierarchyDirty   = false;
+                result.HierarchyDirty = true;
+                state.HierarchyDirty = false;
             }
 
             return result;
@@ -265,7 +325,7 @@ namespace Connector
             BacnetDeviceConfig cfg)
         {
             var deviceObjId = new BacnetObjectId(BacnetObjectTypes.OBJECT_DEVICE, deviceId);
-            var objectIds   = new List<BacnetObjectId>();
+            var objectIds = new List<BacnetObjectId>();
 
             // Try reading the whole list at once first
             try
@@ -321,15 +381,15 @@ namespace Connector
         static readonly Dictionary<string, BacnetObjectTypes> _typeAliases =
             new(StringComparer.OrdinalIgnoreCase)
             {
-                ["AI"]  = BacnetObjectTypes.OBJECT_ANALOG_INPUT,
-                ["AO"]  = BacnetObjectTypes.OBJECT_ANALOG_OUTPUT,
-                ["AV"]  = BacnetObjectTypes.OBJECT_ANALOG_VALUE,
-                ["BI"]  = BacnetObjectTypes.OBJECT_BINARY_INPUT,
-                ["BO"]  = BacnetObjectTypes.OBJECT_BINARY_OUTPUT,
-                ["BV"]  = BacnetObjectTypes.OBJECT_BINARY_VALUE,
-                ["MI"]  = BacnetObjectTypes.OBJECT_MULTI_STATE_INPUT,
-                ["MO"]  = BacnetObjectTypes.OBJECT_MULTI_STATE_OUTPUT,
-                ["MV"]  = BacnetObjectTypes.OBJECT_MULTI_STATE_VALUE,
+                ["AI"] = BacnetObjectTypes.OBJECT_ANALOG_INPUT,
+                ["AO"] = BacnetObjectTypes.OBJECT_ANALOG_OUTPUT,
+                ["AV"] = BacnetObjectTypes.OBJECT_ANALOG_VALUE,
+                ["BI"] = BacnetObjectTypes.OBJECT_BINARY_INPUT,
+                ["BO"] = BacnetObjectTypes.OBJECT_BINARY_OUTPUT,
+                ["BV"] = BacnetObjectTypes.OBJECT_BINARY_VALUE,
+                ["MI"] = BacnetObjectTypes.OBJECT_MULTI_STATE_INPUT,
+                ["MO"] = BacnetObjectTypes.OBJECT_MULTI_STATE_OUTPUT,
+                ["MV"] = BacnetObjectTypes.OBJECT_MULTI_STATE_VALUE,
             };
 
         /// <summary>
@@ -379,7 +439,7 @@ namespace Connector
             }
 
             // Pre-compile regex objects (null = not active)
-            Regex? includeNameRx = filter.NamePattern        is not null ? new Regex(filter.NamePattern,        RegexOptions.IgnoreCase) : null;
+            Regex? includeNameRx = filter.NamePattern is not null ? new Regex(filter.NamePattern, RegexOptions.IgnoreCase) : null;
             Regex? excludeNameRx = filter.ExcludeNamePattern is not null ? new Regex(filter.ExcludeNamePattern, RegexOptions.IgnoreCase) : null;
             Regex? includeDescRx = filter.DescriptionPattern is not null ? new Regex(filter.DescriptionPattern, RegexOptions.IgnoreCase) : null;
 
@@ -412,7 +472,7 @@ namespace Connector
                     : oid.ToString();
 
                 if (includeNameRx != null && !includeNameRx.IsMatch(objectName)) continue;
-                if (excludeNameRx != null &&  excludeNameRx.IsMatch(objectName)) continue;
+                if (excludeNameRx != null && excludeNameRx.IsMatch(objectName)) continue;
 
                 // 4. Description filter – read PROP_DESCRIPTION only when needed
                 string description = "";
@@ -442,10 +502,10 @@ namespace Connector
                 // 6. Friendly properties (Deziko proprietary)
                 string nameExt = ReadStringProp(client, address, oid, PropNameExtension);
                 var namingPath = ReadStringListProp(client, address, oid, PropNamingPath);
- 
+
                 // 7. Category (Deziko proprietary 4941)
                 ReadIntProp(client, address, oid, PropCategory4941, out int category);
- 
+
                 // 8. Trend Log (Deziko proprietary 4452)
                 ReadObjectIdProp(client, address, oid, PropTrendLogReference, out var logId);
 
@@ -524,12 +584,12 @@ namespace Connector
         /// AI, BI, MI are sensor inputs and are never commandable.
         /// </summary>
         static bool IsCommandableType(BacnetObjectTypes t) => t is
-            BacnetObjectTypes.OBJECT_ANALOG_OUTPUT      or
-            BacnetObjectTypes.OBJECT_ANALOG_VALUE       or
-            BacnetObjectTypes.OBJECT_BINARY_OUTPUT      or
-            BacnetObjectTypes.OBJECT_BINARY_VALUE       or
+            BacnetObjectTypes.OBJECT_ANALOG_OUTPUT or
+            BacnetObjectTypes.OBJECT_ANALOG_VALUE or
+            BacnetObjectTypes.OBJECT_BINARY_OUTPUT or
+            BacnetObjectTypes.OBJECT_BINARY_VALUE or
             BacnetObjectTypes.OBJECT_MULTI_STATE_OUTPUT or
-            BacnetObjectTypes.OBJECT_MULTI_STATE_VALUE  or
+            BacnetObjectTypes.OBJECT_MULTI_STATE_VALUE or
             BacnetObjectTypes.OBJECT_INTEGER_VALUE;
 
 
@@ -624,7 +684,7 @@ namespace Connector
                 try
                 {
                     var addrs = System.Net.Dns.GetHostAddresses(host);
-                    var v4    = addrs.FirstOrDefault(
+                    var v4 = addrs.FirstOrDefault(
                         a => a.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork);
                     if (v4 != null) ip = v4.ToString();
                 }
@@ -639,7 +699,7 @@ namespace Connector
             var directAddress = new BacnetAddress(BacnetAddressTypes.IP, $"{ip}:{port}");
 
             BacnetAddress? iamAddress = null;
-            using var      signal     = new ManualResetEventSlim(false);
+            using var signal = new ManualResetEventSlim(false);
 
             void OnIam(BacnetClient _, BacnetAddress adr, uint id,
                        uint maxApdu, BacnetSegmentations seg, ushort vendor)
@@ -669,7 +729,7 @@ namespace Connector
         static BacnetClient OpenClient(ConnectionConfig conn)
         {
             var transport = new BacnetIpUdpProtocolTransport(port: 0, useExclusivePort: true);
-            var client    = new BacnetClient(transport);
+            var client = new BacnetClient(transport);
             client.Start();
             return client;
         }
@@ -696,30 +756,30 @@ namespace Connector
 
         static string PropSuffix(BacnetPropertyIds p) => p switch
         {
-            BacnetPropertyIds.PROP_PRESENT_VALUE  => "value",
-            BacnetPropertyIds.PROP_OBJECT_NAME    => "name",
-            BacnetPropertyIds.PROP_DESCRIPTION    => "desc",
-            BacnetPropertyIds.PROP_UNITS          => "units",
-            BacnetPropertyIds.PROP_STATUS_FLAGS   => "status",
+            BacnetPropertyIds.PROP_PRESENT_VALUE => "value",
+            BacnetPropertyIds.PROP_OBJECT_NAME => "name",
+            BacnetPropertyIds.PROP_DESCRIPTION => "desc",
+            BacnetPropertyIds.PROP_UNITS => "units",
+            BacnetPropertyIds.PROP_STATUS_FLAGS => "status",
             BacnetPropertyIds.PROP_OUT_OF_SERVICE => "oos",
-            BacnetPropertyIds.PROP_RELIABILITY    => "rel",
-            BacnetPropertyIds.PROP_EVENT_STATE    => "evt",
-            (BacnetPropertyIds)4311               => "subst_value",
-            (BacnetPropertyIds)4312               => "subst_active",
-            (BacnetPropertyIds)4340               => "last_change",
-            (BacnetPropertyIds)5092               => "io_binding",
-            (BacnetPropertyIds)5094               => "asset_id",
-            (BacnetPropertyIds)5103               => "comm_status",
-            _                                     => p.ToString().Replace("PROP_", "").ToLower(),
+            BacnetPropertyIds.PROP_RELIABILITY => "rel",
+            BacnetPropertyIds.PROP_EVENT_STATE => "evt",
+            (BacnetPropertyIds)4311 => "subst_value",
+            (BacnetPropertyIds)4312 => "subst_active",
+            (BacnetPropertyIds)4340 => "last_change",
+            (BacnetPropertyIds)5092 => "io_binding",
+            (BacnetPropertyIds)5094 => "asset_id",
+            (BacnetPropertyIds)5103 => "comm_status",
+            _ => p.ToString().Replace("PROP_", "").ToLower(),
         };
 
         private void ExpandStatusFlags(Telemetry tel, string baseKey, BacnetBitString bs)
         {
             // Bit 0: in-alarm, 1: fault, 2: overridden, 3: out-of-service
-            tel[$"{baseKey}_alarm"]      = bs.GetBit(0) ? 1.0 : 0.0;
-            tel[$"{baseKey}_fault"]      = bs.GetBit(1) ? 1.0 : 0.0;
+            tel[$"{baseKey}_alarm"] = bs.GetBit(0) ? 1.0 : 0.0;
+            tel[$"{baseKey}_fault"] = bs.GetBit(1) ? 1.0 : 0.0;
             tel[$"{baseKey}_overridden"] = bs.GetBit(2) ? 1.0 : 0.0;
-            tel[$"{baseKey}_oos"]        = bs.GetBit(3) ? 1.0 : 0.0;
+            tel[$"{baseKey}_oos"] = bs.GetBit(3) ? 1.0 : 0.0;
         }
 
         private string GetFriendlyName(BacnetObjectInfo obj)
@@ -751,8 +811,8 @@ namespace Connector
             // BACnet STATUS_FLAGS bit positions (MSB-first string representation):
             //   bit 0 = in-alarm  → "1000"   bit 1 = fault → "0100"
             //   bit 2 = overridden→ "0010"   bit 3 = out-of-service → "0001"
-            bool inAlarm      = bs.GetBit(0);
-            bool isFault      = bs.GetBit(1);
+            bool inAlarm = bs.GetBit(0);
+            bool isFault = bs.GetBit(1);
             bool outOfService = bs.GetBit(3);
 
             // Also treat RELIABILITY != NO_FAULT_DETECTED (0) as a fault
@@ -765,15 +825,15 @@ namespace Connector
             }
 
             // ── Alarm type: "In Alarm" or "Communication Fault" ───────────────
-            string shortObj  = $"{obj.ObjectId.type.ToString().Replace("OBJECT_", "").Replace("_", "").ToUpper()}:{obj.ObjectId.instance}";
+            string shortObj = $"{obj.ObjectId.type.ToString().Replace("OBJECT_", "").Replace("_", "").ToUpper()}:{obj.ObjectId.instance}";
             string alarmType = hasReliabilityFault ? "Communication Fault"
-                             : isFault             ? "Fault"
-                             : inAlarm             ? "In Alarm"
+                             : isFault ? "Fault"
+                             : inAlarm ? "In Alarm"
                                                    : "Out of Service";
-                string category  = alarmType; // for use in description/message below
+            string category = alarmType; // for use in description/message below
 
-            string friendly  = GetFriendlyName(obj);
-            bool   isAlarmed = isFault || inAlarm || hasReliabilityFault || outOfService;
+            string friendly = GetFriendlyName(obj);
+            bool isAlarmed = isFault || inAlarm || hasReliabilityFault || outOfService;
 
             // Capture last state for potential re-evaluation after hierarchy discovery
             lock (state.ActiveAlarms)
@@ -785,8 +845,16 @@ namespace Connector
             {
                 if (state.TbDeviceId is null) return;
 
+                // ── Wait for hierarchy initialization if enabled ─────────────
+                if (device.Bacnet?.Hierarchy?.Enabled == true && !state.HierarchyReady)
+                {
+                    // Alarms will be re-evaluated and sent once HierarchyReady is true 
+                    // (via UpdateAssetIdMap cleanup pass).
+                    return;
+                }
+
                 string severity = hasReliabilityFault || isFault ? "CRITICAL"
-                                : inAlarm                        ? "MAJOR"
+                                : inAlarm ? "MAJOR"
                                                                  : "WARNING";
 
                 string pathStr = obj.NamingPath.Count > 0 ? string.Join(" › ", obj.NamingPath) : obj.ObjectName;
@@ -830,7 +898,7 @@ namespace Connector
                         // Use the simple "type_instance" key format matching DezikoProvisioner.cs
                         string? assetId = null;
                         string simpleKey = $"{BacnetObjectInfo.ShortTypeName(obj.ObjectId.type)}_{obj.ObjectId.instance}";
-                        
+
                         lock (state.ActiveAlarms)
                         {
                             if (state.AssetIdMap.TryGetValue(simpleKey, out var mappedId))
@@ -874,7 +942,7 @@ namespace Connector
                         {
                             // Single-type cleanup: clear the clean-type alarm from the device
                             await tbApi.ClearAlarmAsync(originator.OriginId, alarmType, originator.OriginType);
-                            
+
                             Console.WriteLine($"  [Alarm] Migrated {alarmType} from DEVICE to ASSET for {obj.ObjectId}");
                         }
 
@@ -911,7 +979,7 @@ namespace Connector
         //  Historical Sync – reads PROP_LOG_BUFFER from associated Trend Logs
         // =====================================================================
         private async Task SyncTrendLogsAsync(
-            BacnetClient client, BacnetAddress address, DiscoveryState state, 
+            BacnetClient client, BacnetAddress address, DiscoveryState state,
             ThingsBoardApi tbApi, DeviceConfig device)
         {
             List<BacnetObjectInfo> objectsWithLogs;
@@ -933,44 +1001,38 @@ namespace Connector
                     // Read the last records from the Trend Log buffer.
                     // ela-compil's ReadRangeRequest with index=1, count=-100 
                     // retrieves the 100 most recent records.
-                    if (client.ReadRangeRequest(address, obj.LogObjectId.Value, 
-                        BacnetPropertyIds.PROP_LOG_BUFFER, out byte[] _, out uint _,
-                        index: 1, count: -100))
+                    if (client.ReadPropertyRequest(address, obj.LogObjectId.Value,
+                        BacnetPropertyIds.PROP_LOG_BUFFER, out IList<BacnetValue> records))
                     {
-                        // Fallback: Read records by property request if supported as a list.
-                        if (client.ReadPropertyRequest(address, obj.LogObjectId.Value, 
-                            BacnetPropertyIds.PROP_LOG_BUFFER, out IList<BacnetValue> records))
+                        int synced = 0;
+                        foreach (var rec in records)
                         {
-                            int synced = 0;
-                            foreach (var rec in records)
+                            // A BacnetLogRecord typically contains a timestamp and a value.
+                            // In many implementations, it's returned as a list of values: [timestamp, value, status]
+                            if (rec.Value is IList<BacnetValue> parts && parts.Count >= 2)
                             {
-                                // A BacnetLogRecord typically contains a timestamp and a value.
-                                // In many implementations, it's returned as a list of values: [timestamp, value, status]
-                                if (rec.Value is IList<BacnetValue> parts && parts.Count >= 2)
+                                if (parts[0].Value is DateTime dt && TryToDouble(parts[1].Value, out double val))
                                 {
-                                    if (parts[0].Value is BacnetDateTime bdt && TryToDouble(parts[1].Value, out double val))
-                                    {
-                                        long ts = new DateTimeOffset(bdt.DateTime).ToUnixTimeMilliseconds();
-                                        
-                                        // Find Asset ID
-                                        string? assetId = null;
-                                        string simpleKey = $"{BacnetObjectInfo.ShortTypeName(obj.ObjectId.type)}_{obj.ObjectId.instance}";
-                                        lock (state.ActiveAlarms)
-                                        {
-                                            state.AssetIdMap.TryGetValue(simpleKey, out assetId);
-                                        }
+                                    long ts = new DateTimeOffset(dt).ToUnixTimeMilliseconds();
 
-                                        if (assetId != null)
-                                        {
-                                            await tbApi.PostAssetTelemetryAsync(assetId, "value", val, ts);
-                                            synced++;
-                                        }
+                                    // Find Asset ID
+                                    string? assetId = null;
+                                    string simpleKey = $"{BacnetObjectInfo.ShortTypeName(obj.ObjectId.type)}_{obj.ObjectId.instance}";
+                                    lock (state.ActiveAlarms)
+                                    {
+                                        state.AssetIdMap.TryGetValue(simpleKey, out assetId);
+                                    }
+
+                                    if (assetId != null)
+                                    {
+                                        await tbApi.PostAssetTelemetryAsync(assetId, "value", val, ts);
+                                        synced++;
                                     }
                                 }
                             }
-                            if (synced > 0)
-                                Console.WriteLine($"  [BACnet]   Synced {synced} historical records for {obj.ObjectId}");
                         }
+                        if (synced > 0)
+                            Console.WriteLine($"  [BACnet]   Synced {synced} historical records for {obj.ObjectId}");
                     }
                 }
                 catch (Exception ex)
@@ -996,7 +1058,7 @@ namespace Connector
                 result = Convert.ToDouble(v);
                 return true;
             }
-            try   { result = Math.Round(Convert.ToDouble(v), 6); return true; }
+            try { result = Math.Round(Convert.ToDouble(v), 6); return true; }
             catch { result = 0; return false; }
         }
 
@@ -1005,56 +1067,72 @@ namespace Connector
         class DiscoveryState
         {
             // ── Core discovery ────────────────────────────────────────────────
-            public bool                   DiscoveryDone   { get; set; }
-            public bool                   AttributesSent  { get; set; }  // non-COV only
-            public bool                   HierarchyDirty  { get; set; }
-            public string?                 TbDeviceId      { get; set; }
-            public DateTime               LastDiscovery   { get; set; } = DateTime.MinValue;
-            public List<BacnetObjectInfo> CachedObjects   { get; set; } = new();
+            public bool DiscoveryDone { get; set; }
+            public bool AttributesSent { get; set; }  // non-COV only
+            public bool HierarchyDirty { get; set; }
+            public bool HierarchyReady { get; set; }
+            public string? TbDeviceId { get; set; }
+            public DateTime LastDiscovery { get; set; } = DateTime.MinValue;
+            public List<BacnetObjectInfo> CachedObjects { get; set; } = new();
             /// <summary>Populated after discovery when hierarchy extraction is enabled.</summary>
-            public DezikoTree?            Tree            { get; set; }
+            public DezikoTree? Tree { get; set; }
 
             /// <summary>Tracks active ThingsBoard alarm types for this device to allow clearing.</summary>
-            public HashSet<string>        ActiveAlarms    { get; set; } = new();
+            public HashSet<string> ActiveAlarms { get; set; } = new();
 
-            /// <summary>
-            /// Cache of originator (entityId, entityType) per BACnet object, resolved once on first alarm.
-            /// entityType is "ASSET" when a matching TB asset was found, otherwise "DEVICE".
-            /// </summary>
+            /// <summary>Cache of originator (entityId, entityType) per BACnet object, resolved once on first alarm.</summary>
             public Dictionary<BacnetObjectId, (string Id, string EntityType)>
-                                          OriginatorCache { get; set; } = new();
+                                          OriginatorCache
+            { get; set; } = new();
 
-            /// <summary>Explicit mapping from keyPrefix (e.g. "ai_1") to TB Asset UUID, populated after hierarchy provisioning.</summary>
-            public Dictionary<string, string> AssetIdMap { get; set; } = new();
+            /// <summary>Explicit mapping from keyPrefix (e.g. "ai_1") to TB Asset UUID. Case-insensitive (Future 1.3).</summary>
+            public Dictionary<string, string> AssetIdMap { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
+            public TelemetryConflator? Conflator { get; set; }
+
+            public TelemetryConflator GetConflator(Func<Telemetry, Task> publisher)
+            {
+                if (Conflator == null)
+                {
+                    lock (this)
+                    {
+                        Conflator ??= new TelemetryConflator(publisher);
+                    }
+                }
+                return Conflator;
+            }
 
             /// <summary>Stores the last known status/values for re-evaluating alarms after hierarchy ready.</summary>
             public Dictionary<BacnetObjectId, (BacnetBitString? Status, Dictionary<BacnetPropertyIds, object?> Values)>
-                                          LastAlarmState { get; set; } = new();
+                                          LastAlarmState
+            { get; set; } = new();
 
             // ── COV mode ──────────────────────────────────────────────────────
             /// <summary>Long-lived client kept open for the lifetime of the process (COV mode).</summary>
-            public BacnetClient?          CovClient       { get; set; }
-            public BacnetAddress?         CovAddress      { get; set; }
+            public BacnetClient? CovClient { get; set; }
+            public BacnetAddress? CovAddress { get; set; }
 
             /// <summary>Latest value received via COV notification per object.</summary>
             public Dictionary<BacnetObjectId, CovSnapshot>
-                                          CovValues       { get; set; } = new();
+                                          CovValues
+            { get; set; } = new();
 
             /// <summary>When each COV subscription expires (we renew 30 s before).</summary>
             public Dictionary<BacnetObjectId, DateTime>
-                                          CovSubExpiry    { get; set; } = new();
+                                          CovSubExpiry
+            { get; set; } = new();
 
             /// <summary>Objects that returned a NAK to SubscribeCOV – polled the old way.</summary>
             public HashSet<BacnetObjectId> CovFallbackPoll { get; set; } = new();
 
             // ── Attribute drip-poll ───────────────────────────────────────────
             /// <summary>Round-robin cursor across (object × attribute-property) slots.</summary>
-            public int      AttrPollCursor  { get; set; } = 0;
+            public int AttrPollCursor { get; set; } = 0;
             /// <summary>Earliest time the next attribute read is permitted.</summary>
-            public DateTime NextAttrPoll    { get; set; } = DateTime.MinValue;
+            public DateTime NextAttrPoll { get; set; } = DateTime.MinValue;
 
             // ── Async publish callbacks (set by Program.cs for COV devices) ───
-            public Func<Telemetry,  Task>? PublishTelemetry  { get; set; }
+            public Func<Telemetry, Task>? PublishTelemetry { get; set; }
             public Func<Attributes, Task>? PublishAttributes { get; set; }
         }
 
@@ -1069,8 +1147,9 @@ namespace Connector
 
             lock (state.ActiveAlarms)
             {
-                state.AssetIdMap = map;
+                state.AssetIdMap = new Dictionary<string, string>(map, StringComparer.OrdinalIgnoreCase);
                 state.TbDeviceId = tbDeviceId;
+                state.HierarchyReady = true;
                 // Clear the originator cache for this device so next alarm updates use the new map
                 state.OriginatorCache.Clear();
 
@@ -1082,18 +1161,18 @@ namespace Connector
             }
 
             Console.WriteLine($"  [BACnet] Updated AssetIdMap for '{deviceName}' ({map.Count} mappings). Running cleanup pass…");
-            
+
             // ── Cleanup Pass: Clear all active alarms on the Device that now belong to Assets ──
             _ = Task.Run(async () =>
             {
                 var deviceAlarms = await tbApi.GetActiveAlarmsAsync(tbDeviceId, "DEVICE");
                 int clearedCount = 0;
-                
+
                 Console.WriteLine($"  [BACnet] Cleanup pass started for '{deviceName}'. Found {deviceAlarms.Count} active alarms on device.");
 
                 foreach (var a in deviceAlarms)
                 {
-                    try 
+                    try
                     {
                         string aType = a.GetProperty("type").GetString() ?? "";
                         if (a.TryGetProperty("details", out var details) && details.TryGetProperty("object", out var objIdProp))
@@ -1105,7 +1184,7 @@ namespace Connector
                                 .Replace("BINARYINPUT", "BI").Replace("BINARYOUTPUT", "BO").Replace("BINARYVALUE", "BV")
                                 .Replace("MULTISTATEINPUT", "MSI").Replace("MULTISTATEOUTPUT", "MSO").Replace("MULTISTATEVALUE", "MSV");
 
-                            bool isMapped = map.ContainsKey(normalized) || 
+                            bool isMapped = map.ContainsKey(normalized) ||
                                              map.ContainsKey(alarmObjId) ||
                                              map.ContainsKey(normalized.ToLowerInvariant()) ||
                                              map.ContainsKey(alarmObjId.ToLowerInvariant());
@@ -1120,7 +1199,8 @@ namespace Connector
                                 }
                             }
                         }
-                    } catch (Exception ex) { Console.WriteLine($"    [Error] Cleanup pass failed for an alarm: {ex.Message}"); }
+                    }
+                    catch (Exception ex) { Console.WriteLine($"    [Error] Cleanup pass failed for an alarm: {ex.Message}"); }
                 }
                 if (clearedCount > 0) Console.WriteLine($"  [BACnet] Cleanup pass for '{deviceName}': {clearedCount} stale device alarms cleared.");
 
@@ -1167,22 +1247,22 @@ namespace Connector
         /// whenever a COV notification arrives.
         /// </summary>
         public void InitCovMode(
-            ConnectionConfig              conn,
-            DeviceConfig                  device,
-            ThingsBoardApi                tbApi,
-            Func<Telemetry,  Task>        publishTelemetry,
-            Func<Attributes, Task>        publishAttributes)
+            ConnectionConfig conn,
+            DeviceConfig device,
+            ThingsBoardApi tbApi,
+            Func<Telemetry, Task> publishTelemetry,
+            Func<Attributes, Task> publishAttributes)
         {
-            var cfg    = device.Bacnet!;
-            var state  = GetOrCreateState(device.Name);
+            var cfg = device.Bacnet!;
+            var state = GetOrCreateState(device.Name);
 
-            state.PublishTelemetry  = publishTelemetry;
+            state.PublishTelemetry = publishTelemetry;
             state.PublishAttributes = publishAttributes;
-            
+
             _ = Task.Run(async () => state.TbDeviceId = await tbApi.FindDeviceIdAsync(device.Name));
 
             // Long-lived client (one UDP socket per device)
-            state.CovClient  = OpenClient(conn);
+            state.CovClient = OpenClient(conn);
             state.CovAddress = ResolveAddress(
                 state.CovClient, conn.Host, conn.Port,
                 device.BacnetDeviceId!.Value,
@@ -1194,9 +1274,12 @@ namespace Connector
                 {
                     // ACK confirmed notifications
                     if (needConfirm)
-                        try { sender.SimpleAckResponse(adr,
+                        try
+                        {
+                            sender.SimpleAckResponse(adr,
                             BacnetConfirmedServices.SERVICE_CONFIRMED_COV_NOTIFICATION,
-                            invokeId); }
+                            invokeId);
+                        }
                         catch { /* best-effort */ }
 
                     BacnetObjectInfo? objInfo;
@@ -1218,10 +1301,10 @@ namespace Connector
                     }
 
                     if (tel.Count > 0)
-                        Task.Run(() => publishTelemetry(tel))
-                            .ContinueWith(t => Console.Error.WriteLine(
-                                $"  [COV] Publish failed for {monitoredObjId}: {t.Exception?.GetBaseException().Message}"),
-                                TaskContinuationOptions.OnlyOnFaulted);
+                    {
+                        // Use the conflator to batch updates (Future 1.2)
+                        state.GetConflator(publishTelemetry).Add(tel);
+                    }
 
                     // ── Diagnostic Alarms (COV) ───────────────────────────────
                     if (values.Any(pv => (BacnetPropertyIds)pv.property.propertyIdentifier == BacnetPropertyIds.PROP_STATUS_FLAGS))
@@ -1230,7 +1313,7 @@ namespace Connector
                         var allProps = values.ToDictionary(
                             pv => (BacnetPropertyIds)pv.property.propertyIdentifier,
                             pv => pv.value?.Count > 0 ? pv.value[0].Value : null);
-                        
+
                         HandleObjectAlarms(tbApi, device, state, objInfo, statusPv.value[0].Value, allProps);
                     }
                 };
@@ -1240,8 +1323,9 @@ namespace Connector
             EnsureCovSubscriptions(state, cfg);
 
             // ── Sync Trend Logs (Historical Backfill) ─────────────────────
-            _ = Task.Run(async () => {
-                await Task.Delay(5000); 
+            _ = Task.Run(async () =>
+            {
+                await Task.Delay(5000);
                 await SyncTrendLogsAsync(state.CovClient, state.CovAddress, state, tbApi, device);
             });
 
@@ -1259,15 +1343,16 @@ namespace Connector
             DeviceConfig device, BacnetDeviceConfig cfg, DiscoveryState state)
         {
             Console.WriteLine($"  [BACnet] Discovering objects on {device.Name}…");
-            var all      = DiscoverObjects(client, address, device.BacnetDeviceId!.Value, cfg);
+            var all = DiscoverObjects(client, address, device.BacnetDeviceId!.Value, cfg);
             var filtered = ApplyFilter(client, address, all, cfg.Filter);
 
             lock (_stateLock)
             {
-                state.CachedObjects  = filtered;
-                state.LastDiscovery  = DateTime.UtcNow;
-                state.DiscoveryDone  = true;
+                state.CachedObjects = filtered;
+                state.LastDiscovery = DateTime.UtcNow;
+                state.DiscoveryDone = true;
                 state.HierarchyDirty = true;
+                state.HierarchyReady = false;
             }
 
             if (cfg.Hierarchy?.Enabled == true)
@@ -1289,8 +1374,8 @@ namespace Connector
         void EnsureCovSubscriptions(DiscoveryState state, BacnetDeviceConfig cfg)
         {
             var covCfg = cfg.Cov!;
-            var now    = DateTime.UtcNow;
-            var renew  = now.AddSeconds(30);   // renew anything expiring in next 30 s
+            var now = DateTime.UtcNow;
+            var renew = now.AddSeconds(30);   // renew anything expiring in next 30 s
 
             foreach (var obj in state.CachedObjects)
             {
@@ -1350,9 +1435,9 @@ namespace Connector
         /// </summary>
         public BacnetReadResult ServiceCovDevice(ConnectionConfig conn, DeviceConfig device)
         {
-            var cfg    = device.Bacnet!;
+            var cfg = device.Bacnet!;
             var covCfg = cfg.Cov!;
-            var state  = GetOrCreateState(device.Name);
+            var state = GetOrCreateState(device.Name);
             var result = new BacnetReadResult();
 
             if (!state.DiscoveryDone || state.CovClient is null)
@@ -1422,7 +1507,7 @@ namespace Connector
             if (state.HierarchyDirty)
             {
                 result.HierarchyDirty = true;
-                state.HierarchyDirty  = false;
+                state.HierarchyDirty = false;
             }
 
             return result;
@@ -1434,11 +1519,11 @@ namespace Connector
         /// The cursor advances round-robin across all cached objects × all attribute properties.
         /// </summary>
         static Attributes DrainAttributePoll(
-            DiscoveryState      state,
-            BacnetClient        client,
-            BacnetAddress       address,
+            DiscoveryState state,
+            BacnetClient client,
+            BacnetAddress address,
             BacnetPropertyIds[] attrProps,
-            int                 ratePerMinute)
+            int ratePerMinute)
         {
             var result = new Attributes();
             if (attrProps.Length == 0 || state.CachedObjects.Count == 0)
@@ -1449,11 +1534,11 @@ namespace Connector
                 return result;   // rate-limit: not yet
 
             int totalSlots = state.CachedObjects.Count * attrProps.Length;
-            int slot   = state.AttrPollCursor % totalSlots;
+            int slot = state.AttrPollCursor % totalSlots;
             int objIdx = slot / attrProps.Length;
-            int pIdx   = slot % attrProps.Length;
+            int pIdx = slot % attrProps.Length;
 
-            var obj    = state.CachedObjects[objIdx];
+            var obj = state.CachedObjects[objIdx];
             var propId = attrProps[pIdx];
 
             try
@@ -1469,8 +1554,8 @@ namespace Connector
             catch { /* property unavailable on this object */ }
 
             state.AttrPollCursor = (state.AttrPollCursor + 1) % totalSlots;
-            double intervalMs    = ratePerMinute > 0 ? 60_000.0 / ratePerMinute : 12_000;
-            state.NextAttrPoll   = now.AddMilliseconds(intervalMs);
+            double intervalMs = ratePerMinute > 0 ? 60_000.0 / ratePerMinute : 12_000;
+            state.NextAttrPoll = now.AddMilliseconds(intervalMs);
 
             return result;
         }
@@ -1529,7 +1614,7 @@ namespace Connector
 
             // Check commandability from the cached discovery state
             var state = GetOrCreateState(device.Name);
-            var obj   = state.CachedObjects
+            var obj = state.CachedObjects
                             .FirstOrDefault(o => o.ObjectId == objectId);
 
             if (obj is null)
@@ -1542,7 +1627,7 @@ namespace Connector
                     $"Object '{key}' ({objectId}) is not commandable (no PROP_PRIORITY_ARRAY). " +
                     "Write rejected to protect the device logic.");
 
-            using var client  = OpenClient(conn);
+            using var client = OpenClient(conn);
             var address = ResolveAddress(
                 client, conn.Host, conn.Port,
                 device.BacnetDeviceId.Value,

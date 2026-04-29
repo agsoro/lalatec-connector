@@ -25,7 +25,7 @@ if (!File.Exists(jsonPath))
     return;
 }
 
-var jsonDoc = JsonDocument.Parse(File.ReadAllBytes(jsonPath));
+var jsonDoc = JsonDocument.Parse(File.ReadAllText(jsonPath, System.Text.Encoding.UTF8));
 var root    = jsonDoc.RootElement;
 uint DEVICE_ID = root.GetProperty("meta").GetProperty("deviceId").GetUInt32();
 
@@ -149,7 +149,7 @@ client.OnReadPropertyRequest += (sender, adr, invokeId, objectId, property, _) =
 {
     var propId = (BacnetPropertyIds)property.propertyIdentifier;
     string key = $"{(int)objectId.type}:{objectId.instance}";
-    Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] REQ {objectId} (key={key}) prop={propId} from={adr}");
+    // Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] REQ {objectId} (key={key}) prop={propId} from={adr}");
     
     try
     {
@@ -293,25 +293,21 @@ client.OnSubscribeCOV += (sender, adr, invokeId, processId, objectId, cancel, co
 
 void NotifyCov(BacnetObjectId objectId)
 {
-    Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] NotifyCov called for {objectId}");
     try
     {
         string key = $"{(int)objectId.type}:{objectId.instance}";
         List<CovSub> subs;
         lock (covLock)
         {
-            if (!covSubs.TryGetValue(key, out var raw)) 
+            if (!covSubs.TryGetValue(key, out var raw)) return;
+            
+            raw.RemoveAll(s => DateTime.UtcNow > s.ExpiresAt);
+            if (raw.Count == 0)
             {
-                Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] NotifyCov({objectId}) aborted: key '{key}' not in covSubs.");
+                covSubs.Remove(key);
                 return;
             }
-            raw.RemoveAll(s => DateTime.UtcNow > s.ExpiresAt);
             subs = raw.ToList();
-        }
-        if (subs.Count == 0) 
-        {
-            Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] NotifyCov({objectId}) aborted: no active subs.");
-            return;
         }
 
         if (!storage.TryGetValue(key, out var props) || !props.TryGetValue(BacnetPropertyIds.PROP_PRESENT_VALUE, out var pvVals)) 
@@ -341,7 +337,7 @@ void NotifyCov(BacnetObjectId objectId)
         {
             uint remaining = (uint)Math.Max(0, (sub.ExpiresAt - DateTime.UtcNow).TotalSeconds);
             client.Notify(sub.Adr, sub.ProcessId, DEVICE_ID, objectId, remaining, sub.Confirmed, covValues);
-            Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] COV-> {objectId}  val={pvVals[0].Value}  to={sub.Adr}");
+            // Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] COV-> {objectId}  val={pvVals[0].Value}  to={sub.Adr}");
         }
     }
     catch (Exception ex)
@@ -351,7 +347,8 @@ void NotifyCov(BacnetObjectId objectId)
 }
 
 client.Start();
-Console.WriteLine($"=== BACnet/IP Simulator (Data-Driven) device={DEVICE_ID} ===");
+var version = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version;
+Console.WriteLine($"=== BACnet/IP Simulator v{version?.Major}.{version?.Minor}.{version?.Build} (Data-Driven) device={DEVICE_ID} ===");
 Console.WriteLine($"Listening on UDP 0.0.0.0:{PORT}  |  objects={storage.Count}");
 client.Iam(DEVICE_ID, BacnetSegmentations.SEGMENTATION_NONE, null, null);
 
@@ -361,7 +358,7 @@ await Task.Run(async () =>
 {
     while (!cts.Token.IsCancellationRequested)
     {
-        await Task.Delay(5_000, cts.Token).ConfigureAwait(false);
+        await Task.Delay(10_000, cts.Token).ConfigureAwait(false);
         double e = (DateTime.UtcNow - t0).TotalSeconds;
 
         foreach (var oid in allObjectIds)

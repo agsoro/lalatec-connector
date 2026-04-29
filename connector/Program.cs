@@ -27,7 +27,8 @@ namespace Connector
     {
         static async Task Main()
         {
-            Console.WriteLine("=== Modbus / BACnet → ThingsBoard Connector ===\n");
+            var version = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version;
+            Console.WriteLine($"=== Modbus / BACnet → ThingsBoard Connector v{version?.Major}.{version?.Minor}.{version?.Build} ===\n");
 
             // ── Load config ───────────────────────────────────────────────────
             string configPath = Path.Combine(AppContext.BaseDirectory, "connector.json");
@@ -133,7 +134,7 @@ namespace Connector
             // Per-device leaf asset maps (keyPrefix → TB asset UUID)
             // Populated by the background hierarchy provisioner after discovery; the
             // poll loop reads this (under lock) to route telemetry to individual assets.
-            var leafMaps = new Dictionary<string, Dictionary<string, string>>();
+            var leafMaps = new Dictionary<string, Dictionary<string, string>>(StringComparer.OrdinalIgnoreCase);
 
             foreach (var d in cfg.Devices)
             {
@@ -407,7 +408,7 @@ namespace Connector
                 if (parts.Length < 2) continue;
                 string prefix = $"{parts[0]}_{parts[1]}";
 
-                if (!leafMap.TryGetValue(prefix, out var assetId)) continue;
+                if (!leafMap.TryGetValue(prefix.ToLowerInvariant(), out var assetId)) continue;
 
                 if (!byAsset.TryGetValue(assetId, out var bucket))
                     byAsset[assetId] = bucket = new Dictionary<string, double>();
