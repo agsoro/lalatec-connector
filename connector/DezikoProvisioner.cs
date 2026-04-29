@@ -61,7 +61,7 @@ namespace Connector
             }
 
             // Provision orphans: objects with a naming path that were NOT reached by the hierarchy walk.
-            // These often occur in controllers like Desigo CC where the structured views are 
+            // These often occur in controllers like Deziko CC where the structured views are 
             // difficult to traverse fully.
             Console.WriteLine($"  [Hierarchy] Tree walk reached {visited.Count} unique objects. Checking {cachedObjects.Count} cached objects for orphans...");
             foreach (var obj in cachedObjects)

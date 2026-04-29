@@ -93,7 +93,7 @@ namespace Connector
         // BACnet property IDs used below
         const BacnetPropertyIds PropStructuredObjectList = (BacnetPropertyIds)209; // PROP_STRUCTURED_OBJECT_LIST
         const BacnetPropertyIds PropSubordinateList      = (BacnetPropertyIds)355; // PROP_SUBORDINATE_LIST
-        const BacnetPropertyIds PropDesigoSubordinateList = (BacnetPropertyIds)4398; // Desigo-specific Structured List
+        const BacnetPropertyIds PropDezikoSubordinateList = (BacnetPropertyIds)4398; // Deziko-specific Structured List
         const BacnetPropertyIds PropProfileName          = (BacnetPropertyIds)168; // PROP_PROFILE_NAME
         const BacnetPropertyIds PropNamingPath           = (BacnetPropertyIds)4397; // Naming Path (Array of strings)
         const BacnetPropertyIds PropNameExtension        = (BacnetPropertyIds)4438; // Name Extension (String)
@@ -116,11 +116,11 @@ namespace Connector
             var topLevelIds = ReadObjectIdList(client, address, deviceObjId,
                                                PropStructuredObjectList);
 
-            // Fallback for Desigo controllers that use 4398 for the root list
+            // Fallback for Deziko controllers that use 4398 for the root list
             if (topLevelIds.Count == 0)
             {
                 topLevelIds = ReadObjectIdList(client, address, deviceObjId,
-                                               PropDesigoSubordinateList);
+                                               PropDezikoSubordinateList);
             }
 
             Console.WriteLine($"  [Hierarchy] Top-level Structured Views: {topLevelIds.Count}");
@@ -392,10 +392,10 @@ namespace Connector
                     || countVal.Count == 0)
                 {
                     // If we are checking the standard property and it failed,
-                    // and this is a view, try the Desigo property
+                    // and this is a view, try the Deziko property
                     if (propId == PropSubordinateList)
                     {
-                        return ReadSubordinateList(client, address, viewId, PropDesigoSubordinateList);
+                        return ReadSubordinateList(client, address, viewId, PropDezikoSubordinateList);
                     }
                     return result;
                 }
