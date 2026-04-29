@@ -12,6 +12,8 @@ namespace Connector
             {
                 ["janitza"]        = new JanitzaReader(),
                 ["glueck"]         = new GlueckReader(),
+                ["abb"]            = new AbbReader(),
+                ["sunspec"]        = new SunSpecReader(),
                 ["bacnet-generic"] = new BacnetReader(),
             };
 

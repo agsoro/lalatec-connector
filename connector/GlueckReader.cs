@@ -2,14 +2,14 @@
 //
 //  Register map  (0-based, float32 = 2 × 16-bit registers)
 //
-//    Address  Telemetry key              Unit   Notes
-//    ───────  ─────────────────────────  ─────  ──────────────────
-//    0x1230   active_allowed_power_pct   %      0.0 – 100.0
+//    Address  Telemetry key    Unit   Notes
+//    ───────  ───────────────  ─────  ──────────────────
+//    0x1230   power_limit_pct  %      0.0 – 100.0
 //    (= 4656 decimal)
 //
 //  To expose additional registers add them to connector.json:
 //    "writableRegisters": [
-//      { "key": "active_allowed_power_pct", "address": "0x1230", "type": "float32-be" }
+//      { "key": "power_limit_pct", "address": "0x1230", "type": "float32-be" }
 //    ]
 
 using System;
@@ -40,7 +40,7 @@ namespace Connector
 
                 return new Telemetry
                 {
-                    ["active_allowed_power_pct"] = Math.Round(pct, 2),
+                    [TelemetryKeys.PowerLimitPct] = Math.Round(pct, 2),
                 };
             });
         }

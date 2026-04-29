@@ -42,6 +42,8 @@
   // ── Devices ────────────────────────────────────────────────────────────────
   // Supported deviceTypes:
   //   "janitza"      → JanitzaReader  (Modbus TCP, requires slaveId)
+  //   "abb"          → AbbReader      (Modbus TCP, requires slaveId)
+  //   "sunspec"      → SunSpecReader  (Modbus TCP, discovery based, requires slaveId)
   //   "glueck"       → GlueckReader   (Modbus TCP, requires slaveId)
   //   "bacnet-generic" → BacnetReader (BACnet/IP, requires bacnetDeviceId + bacnet block)
 
@@ -64,6 +66,24 @@
       "pollIntervalSeconds": 30
     },
 
+    // ── ABB energy meter ──────────────────────────────────────────────────────
+    {
+      "name":                "ABB Meter Zone C",
+      "deviceType":          "abb",
+      "connectionId":        "modbus-building-a",
+      "slaveId":             106,
+      "pollIntervalSeconds": 30
+    },
+
+    // ── SunSpec Solar Inverter ────────────────────────────────────────────────
+    {
+      "name":                "Fronius Inverter 1",
+      "deviceType":          "sunspec",
+      "connectionId":        "modbus-building-a",
+      "slaveId":             1,
+      "pollIntervalSeconds": 30
+    },
+
     // ── Glück controller ──────────────────────────────────────────────────────
     {
       "name":                "Glueck Controller Zone 1",
@@ -82,7 +102,7 @@
       //
       // Keep this list in sync with the hardware register map.
       "writableRegisters": [
-        { "key": "active_allowed_power_pct", "address": "0x1230", "type": "float32-be" }
+        { "key": "power_limit_pct", "address": "0x1230", "type": "float32-be" }
       ],
 
       // ── Write-back (opt-in) ────────────────────────────────────────────────
