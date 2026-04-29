@@ -91,7 +91,8 @@ namespace Connector
 
                 // Create Entity View
                 string viewName = $"{obj.ObjectName} ({assetName})";
-                await api.EnsureEntityViewAsync(viewName, assetType, assetId, "ASSET", new[] { obj.KeyPrefix }, new string[] { });
+                var telKeys = obj.LogObjectId != null ? new[] { "value" } : Array.Empty<string>();
+                await api.EnsureEntityViewAsync(viewName, assetType, assetId, "ASSET", telKeys, new string[] { });
                 counters.EntityViews++;
 
                 leafMap[obj.KeyPrefix] = assetId;
@@ -220,7 +221,7 @@ namespace Connector
                         viewType:          assetType,
                         sourceEntityId:    leafId,
                         sourceEntityType:  "ASSET",
-                        telemetryKeys:     new[] { "value" },
+                        telemetryKeys:     child.LogObjectId != null ? new[] { "value" } : Array.Empty<string>(),
                         serverAttributes:  evAttrs);
                     c.EntityViews++;
 

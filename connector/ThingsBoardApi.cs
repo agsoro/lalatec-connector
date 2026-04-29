@@ -222,11 +222,11 @@ namespace Connector
         /// Posts a single numeric value as a timestamped time-series data point on an Asset.
         /// Uses the ThingsBoard telemetry API: POST /api/plugins/telemetry/ASSET/{id}/timeseries/ANY
         /// </summary>
-        public async Task PostAssetTelemetryAsync(string assetId, string key, double value)
+        public async Task PostAssetTelemetryAsync(string assetId, string key, double value, long? ts = null)
         {
             var payload = new
             {
-                ts     = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                ts     = ts ?? DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
                 values = new Dictionary<string, double> { [key] = value },
             };
             var resp = await _http.PostAsJsonAsync(

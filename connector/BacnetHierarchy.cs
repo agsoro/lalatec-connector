@@ -73,6 +73,9 @@ namespace Connector
         /// <summary>True = this is an OBJECT_STRUCTURED_VIEW folder; False = it is a data-point leaf.</summary>
         public bool IsView { get; init; }
 
+        /// <summary>Optional associated Trend Log object (Deziko prop 4452).</summary>
+        public BacnetObjectId? LogObjectId { get; init; }
+
         /// <summary>Populated only for view nodes (IsView=true).</summary>
         public List<DezikoNode> Children { get; } = new();
     }
@@ -97,6 +100,7 @@ namespace Connector
         const BacnetPropertyIds PropProfileName          = (BacnetPropertyIds)168; // PROP_PROFILE_NAME
         const BacnetPropertyIds PropNamingPath           = (BacnetPropertyIds)4397; // Naming Path (Array of strings)
         const BacnetPropertyIds PropNameExtension        = (BacnetPropertyIds)4438; // Name Extension (String)
+        const BacnetPropertyIds PropTrendLogReference    = (BacnetPropertyIds)4452; // Trend Log Reference (ObjectId)
 
         // ── Public entry point ────────────────────────────────────────────────
 
@@ -221,6 +225,8 @@ namespace Connector
 
             // PROP_UNITS is an enum value – read as raw and convert to string
             string units = ReadUnitsProp(client, address, oid);
+            
+            ReadObjectIdProp(client, address, oid, PropTrendLogReference, out var logId);
 
             var namingPath = ReadStringListProp(client, address, oid, PropNamingPath);
             string nameExt = ReadStringProp(client, address, oid, PropNameExtension) ?? "";
@@ -235,6 +241,7 @@ namespace Connector
                 ProfileName   = profileName,
                 Units         = units,
                 IsView        = false,
+                LogObjectId   = logId,
             };
         }
 
@@ -253,6 +260,27 @@ namespace Connector
             }
             catch { /* property not available */ }
             return null;
+        }
+
+        static bool ReadObjectIdProp(
+            BacnetClient client, BacnetAddress address,
+            BacnetObjectId oid, BacnetPropertyIds propId, out BacnetObjectId? result)
+        {
+            result = null;
+            try
+            {
+                if (client.ReadPropertyRequest(address, oid, propId,
+                        out IList<BacnetValue> vals) && vals.Count > 0)
+                {
+                    if (vals[0].Value is BacnetObjectId rid)
+                    {
+                        result = rid;
+                        return true;
+                    }
+                }
+            }
+            catch { /* property not available */ }
+            return false;
         }
 
         static List<string> ReadStringListProp(

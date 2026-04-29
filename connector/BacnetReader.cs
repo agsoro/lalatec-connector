@@ -53,7 +53,8 @@ namespace Connector
         string         NameExtension = "",    // friendly alias (from prop 4438)
         string         Description   = "",   // from PROP_DESCRIPTION
         bool           Commandable   = false, // true when PROP_PRIORITY_ARRAY present
-        int            Category      = -1     // from PROP_CATEGORY (4941)
+        int            Category      = -1,    // from PROP_CATEGORY (4941)
+        BacnetObjectId? LogObjectId  = null   // from PROP_TREND_LOG_REFERENCE (4452)
     )
     {
         /// <summary>Sanitised key prefix used in ThingsBoard, e.g. "ai_0_tsu".</summary>
@@ -117,6 +118,7 @@ namespace Connector
         const BacnetPropertyIds PropNameExtension = (BacnetPropertyIds)4438;
         const BacnetPropertyIds PropNamingPath    = (BacnetPropertyIds)4397;
         const BacnetPropertyIds PropCategory4941  = (BacnetPropertyIds)4941;
+        const BacnetPropertyIds PropTrendLogReference = (BacnetPropertyIds)4452;
 
         // =====================================================================
         //  IDeviceReader.Read  –  called by the polling loop
@@ -174,6 +176,16 @@ namespace Connector
 
                 Console.WriteLine($"  [BACnet] {device.Name}: {all.Count} objects found, " +
                                   $"{filtered.Count} after filter.");
+
+                // ── Sync Trend Logs (Historical Backfill) ─────────────────────
+                if (tbApi != null)
+                {
+                    _ = Task.Run(async () => {
+                        // Wait a bit for hierarchy to be provisioned so Assets exist
+                        await Task.Delay(5000); 
+                        await SyncTrendLogsAsync(client, address, state, tbApi, device);
+                    });
+                }
             }
 
             if (state.CachedObjects.Count == 0)
@@ -193,13 +205,16 @@ namespace Connector
             {
                 var values = ReadObjectProperties(client, address, obj.ObjectId, allPropIds);
 
-                // Telemetry
-                foreach (var propId in telPropIds)
+                // Telemetry - only if Trend Log is configured
+                if (obj.LogObjectId != null)
                 {
-                    if (values.TryGetValue(propId, out var raw) && TryToDouble(raw, out double d))
+                    foreach (var propId in telPropIds)
                     {
-                        string key = $"{obj.KeyPrefix}_{PropSuffix(propId)}";
-                        result.Telemetry[key] = Math.Round(d, 4);
+                        if (values.TryGetValue(propId, out var raw) && TryToDouble(raw, out double d))
+                        {
+                            string key = $"{obj.KeyPrefix}_{PropSuffix(propId)}";
+                            result.Telemetry[key] = Math.Round(d, 4);
+                        }
                     }
                 }
 
@@ -431,7 +446,10 @@ namespace Connector
                 // 7. Category (Deziko proprietary 4941)
                 ReadIntProp(client, address, oid, PropCategory4941, out int category);
  
-                result.Add(new BacnetObjectInfo(oid, objectName, namingPath, nameExt, description, commandable, category));
+                // 8. Trend Log (Deziko proprietary 4452)
+                ReadObjectIdProp(client, address, oid, PropTrendLogReference, out var logId);
+
+                result.Add(new BacnetObjectInfo(oid, objectName, namingPath, nameExt, description, commandable, category, logId));
             }
 
             return result;
@@ -475,6 +493,24 @@ namespace Connector
                 {
                     result = Convert.ToInt32(vals[0].Value);
                     return true;
+                }
+            }
+            catch { /* ignore */ }
+            return false;
+        }
+
+        static bool ReadObjectIdProp(BacnetClient client, BacnetAddress address, BacnetObjectId oid, BacnetPropertyIds propId, out BacnetObjectId? result)
+        {
+            result = null;
+            try
+            {
+                if (client.ReadPropertyRequest(address, oid, propId, out IList<BacnetValue> vals) && vals.Count > 0)
+                {
+                    if (vals[0].Value is BacnetObjectId rid)
+                    {
+                        result = rid;
+                        return true;
+                    }
                 }
             }
             catch { /* ignore */ }
@@ -871,6 +907,80 @@ namespace Connector
             }
         }
 
+        // =====================================================================
+        //  Historical Sync – reads PROP_LOG_BUFFER from associated Trend Logs
+        // =====================================================================
+        private async Task SyncTrendLogsAsync(
+            BacnetClient client, BacnetAddress address, DiscoveryState state, 
+            ThingsBoardApi tbApi, DeviceConfig device)
+        {
+            List<BacnetObjectInfo> objectsWithLogs;
+            lock (_stateLock)
+            {
+                objectsWithLogs = state.CachedObjects.Where(o => o.LogObjectId != null).ToList();
+            }
+
+            if (objectsWithLogs.Count == 0) return;
+
+            Console.WriteLine($"  [BACnet] Starting historical sync for {objectsWithLogs.Count} objects on {device.Name}…");
+
+            foreach (var obj in objectsWithLogs)
+            {
+                if (obj.LogObjectId == null) continue;
+
+                try
+                {
+                    // Read the last records from the Trend Log buffer.
+                    // ela-compil's ReadRangeRequest with index=1, count=-100 
+                    // retrieves the 100 most recent records.
+                    if (client.ReadRangeRequest(address, obj.LogObjectId.Value, 
+                        BacnetPropertyIds.PROP_LOG_BUFFER, out byte[] _, out uint _,
+                        index: 1, count: -100))
+                    {
+                        // Fallback: Read records by property request if supported as a list.
+                        if (client.ReadPropertyRequest(address, obj.LogObjectId.Value, 
+                            BacnetPropertyIds.PROP_LOG_BUFFER, out IList<BacnetValue> records))
+                        {
+                            int synced = 0;
+                            foreach (var rec in records)
+                            {
+                                // A BacnetLogRecord typically contains a timestamp and a value.
+                                // In many implementations, it's returned as a list of values: [timestamp, value, status]
+                                if (rec.Value is IList<BacnetValue> parts && parts.Count >= 2)
+                                {
+                                    if (parts[0].Value is BacnetDateTime bdt && TryToDouble(parts[1].Value, out double val))
+                                    {
+                                        long ts = new DateTimeOffset(bdt.DateTime).ToUnixTimeMilliseconds();
+                                        
+                                        // Find Asset ID
+                                        string? assetId = null;
+                                        string simpleKey = $"{BacnetObjectInfo.ShortTypeName(obj.ObjectId.type)}_{obj.ObjectId.instance}";
+                                        lock (state.ActiveAlarms)
+                                        {
+                                            state.AssetIdMap.TryGetValue(simpleKey, out assetId);
+                                        }
+
+                                        if (assetId != null)
+                                        {
+                                            await tbApi.PostAssetTelemetryAsync(assetId, "value", val, ts);
+                                            synced++;
+                                        }
+                                    }
+                                }
+                            }
+                            if (synced > 0)
+                                Console.WriteLine($"  [BACnet]   Synced {synced} historical records for {obj.ObjectId}");
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"  [BACnet]   Failed to sync trend log for {obj.ObjectId}: {ex.Message}");
+                }
+            }
+            Console.WriteLine($"  [BACnet] Historical sync for {device.Name} complete.");
+        }
+
         static bool TryToDouble(object? v, out double result)
         {
             if (v is null) { result = 0; return false; }
@@ -1128,6 +1238,12 @@ namespace Connector
             // Discovery + initial subscriptions
             RunDiscoveryInternal(state.CovClient, state.CovAddress, device, cfg, state);
             EnsureCovSubscriptions(state, cfg);
+
+            // ── Sync Trend Logs (Historical Backfill) ─────────────────────
+            _ = Task.Run(async () => {
+                await Task.Delay(5000); 
+                await SyncTrendLogsAsync(state.CovClient, state.CovAddress, state, tbApi, device);
+            });
 
             Console.WriteLine(
                 $"  [COV] {device.Name}: {state.CachedObjects.Count} subscribed, " +
