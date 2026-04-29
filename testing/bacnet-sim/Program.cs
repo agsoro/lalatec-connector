@@ -125,7 +125,10 @@ static byte[] HexToBytes(string hex)
 }
 
 // ── Derived Metadata ──────────────────────────────────────────────────────────
-var allObjectIds = storage.Keys.Select(BacnetObjectId.Parse).ToArray();
+var allObjectIds = storage.Keys.Select(k => {
+    var p = k.Split(':');
+    return new BacnetObjectId((BacnetObjectTypes)int.Parse(p[0]), uint.Parse(p[1]));
+}).ToArray();
 var deviceObjId  = new BacnetObjectId(BacnetObjectTypes.OBJECT_DEVICE, DEVICE_ID);
 
 // ── COV subscription store ────────────────────────────────────────────────────
@@ -138,10 +141,11 @@ var client    = new BacnetClient(transport);
 
 client.OnWhoIs += (sender, adr, lo, hi) =>
 {
+    // Respond if our ID is in range, or if the range is empty (Who-Is for all)
     if (lo == -1 || (lo <= DEVICE_ID && DEVICE_ID <= (uint)hi))
     {
         sender.Iam(DEVICE_ID, BacnetSegmentations.SEGMENTATION_NONE, null, null);
-        Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Who-Is → I-Am to {adr}");
+        Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Who-Is ({lo}..{hi}) → I-Am ({DEVICE_ID}) to {adr}");
     }
 };
 

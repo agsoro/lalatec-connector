@@ -110,31 +110,14 @@ namespace Connector
         List<string> NamingPath,           // friendly path segments (from prop 4397)
         string NameExtension = "",    // friendly alias (from prop 4438)
         string Description = "",   // from PROP_DESCRIPTION
+        string ProfileName = "",   // from PROP_PROFILE_NAME (168)
         bool Commandable = false, // true when PROP_PRIORITY_ARRAY present
         int Category = -1,    // from PROP_CATEGORY (4941)
         BacnetObjectId? LogObjectId = null   // from PROP_TREND_LOG_REFERENCE (4452)
     )
     {
-        /// <summary>Sanitised key prefix used in ThingsBoard, e.g. "ai_0_tsu".</summary>
-        public string KeyPrefix
-        {
-            get
-            {
-                // Priority for friendly name:
-                // 1. Last segment of NamingPath (prop 4397)
-                // 2. NameExtension (prop 4438)
-                // 3. Last segment of ObjectName (technical path)
-                string friendly = NamingPath.Any() ? NamingPath.Last() : NameExtension;
-
-                string baseName = !string.IsNullOrWhiteSpace(friendly)
-                    ? friendly
-                    : (ObjectName.Contains('.')
-                        ? ObjectName[(ObjectName.LastIndexOf('.') + 1)..]
-                        : ObjectName);
-
-                return $"{ShortTypeName(ObjectId.type)}_{ObjectId.instance}_" + Sanitise(baseName);
-            }
-        }
+        /// <summary>Sanitised technical ObjectName used as the key prefix, e.g. "g01_asp01_rlt001_t_su".</summary>
+        public string KeyPrefix => Sanitise(ObjectName);
 
         public static string ShortTypeName(BacnetObjectTypes t) => t switch
         {
@@ -153,8 +136,16 @@ namespace Connector
             _ => t.ToString().Replace("OBJECT_", "").ToLower(),
         };
 
-        static string Sanitise(string name) =>
-            Regex.Replace(name.ToLowerInvariant().Trim(), @"[^a-z0-9]+", "_").Trim('_');
+        static string Sanitise(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return "";
+            name = name.ToLowerInvariant().Trim()
+                .Replace("ä", "a")
+                .Replace("ö", "o")
+                .Replace("ü", "u")
+                .Replace("ß", "ss");
+            return Regex.Replace(name, @"[^a-z0-9]+", "_").Trim('_');
+        }
     }
 
     // =========================================================================
@@ -177,6 +168,7 @@ namespace Connector
         const BacnetPropertyIds PropNamingPath = (BacnetPropertyIds)4397;
         const BacnetPropertyIds PropCategory4941 = (BacnetPropertyIds)4941;
         const BacnetPropertyIds PropTrendLogReference = (BacnetPropertyIds)4452;
+        const BacnetPropertyIds PropProfileName = BacnetPropertyIds.PROP_PROFILE_NAME;
 
         // =====================================================================
         //  IDeviceReader.Read  –  called by the polling loop
@@ -509,7 +501,10 @@ namespace Connector
                 // 8. Trend Log (Deziko proprietary 4452)
                 ReadObjectIdProp(client, address, oid, PropTrendLogReference, out var logId);
 
-                result.Add(new BacnetObjectInfo(oid, objectName, namingPath, nameExt, description, commandable, category, logId));
+                // 9. Profile Name (standard 168)
+                string profileName = ReadStringProp(client, address, oid, PropProfileName) ?? "";
+
+                result.Add(new BacnetObjectInfo(oid, objectName, namingPath, nameExt, description, profileName, commandable, category, logId));
             }
 
             return result;
@@ -895,13 +890,12 @@ namespace Connector
                     if (resolved.OriginType == "DEVICE")
                     {
                         // 1. Explicit AssetIdMap (the professional way)
-                        // Use the simple "type_instance" key format matching DezikoProvisioner.cs
+                        // Use the technical KeyPrefix (sanitized ObjectName) matching DezikoProvisioner.cs
                         string? assetId = null;
-                        string simpleKey = $"{BacnetObjectInfo.ShortTypeName(obj.ObjectId.type)}_{obj.ObjectId.instance}";
 
                         lock (state.ActiveAlarms)
                         {
-                            if (state.AssetIdMap.TryGetValue(simpleKey, out var mappedId))
+                            if (state.AssetIdMap.TryGetValue(obj.KeyPrefix, out var mappedId))
                                 assetId = mappedId;
                         }
 
@@ -1017,10 +1011,9 @@ namespace Connector
 
                                     // Find Asset ID
                                     string? assetId = null;
-                                    string simpleKey = $"{BacnetObjectInfo.ShortTypeName(obj.ObjectId.type)}_{obj.ObjectId.instance}";
                                     lock (state.ActiveAlarms)
                                     {
-                                        state.AssetIdMap.TryGetValue(simpleKey, out assetId);
+                                        state.AssetIdMap.TryGetValue(obj.KeyPrefix, out assetId);
                                     }
 
                                     if (assetId != null)
@@ -1304,6 +1297,14 @@ namespace Connector
                     {
                         // Use the conflator to batch updates (Future 1.2)
                         state.GetConflator(publishTelemetry).Add(tel);
+
+                        // Also post to Asset via REST (Target Entity requirement)
+                        string? assetId = null;
+                        lock (state.ActiveAlarms) { state.AssetIdMap.TryGetValue(objInfo.KeyPrefix, out assetId); }
+                        if (assetId != null)
+                        {
+                            _ = tbApi.PostAssetTelemetryBatchAsync(assetId, tel);
+                        }
                     }
 
                     // ── Diagnostic Alarms (COV) ───────────────────────────────
@@ -1607,15 +1608,27 @@ namespace Connector
                     $"Device '{device.Name}' is missing the 'bacnet' config block.");
 
             // Resolve target object from the ThingsBoard key
-            if (!TryParseKeyToObjectId(key, out BacnetObjectId objectId))
-                throw new ArgumentException(
-                    $"Cannot parse BACnet object from key '{key}'. " +
-                    "Expected format: {type}_{instance}_{name}_{prop}, e.g. ao_3_supply_sp_value.");
-
-            // Check commandability from the cached discovery state
             var state = GetOrCreateState(device.Name);
+            
+            // 1. Try lookup by technical KeyPrefix (e.g. "g01_asp01_rlt001_t_su_value")
             var obj = state.CachedObjects
-                            .FirstOrDefault(o => o.ObjectId == objectId);
+                .FirstOrDefault(o => key.StartsWith(o.KeyPrefix + "_", StringComparison.OrdinalIgnoreCase));
+
+            BacnetObjectId objectId;
+            if (obj != null)
+            {
+                objectId = obj.ObjectId;
+            }
+            else
+            {
+                // 2. Fallback to legacy parsing (e.g. "ao_3_supply_temp_sp_value")
+                if (!TryParseKeyToObjectId(key, out objectId))
+                    throw new ArgumentException(
+                        $"Cannot resolve BACnet object from key '{key}'. " +
+                        "Expected either a technical path (g01...) or legacy format (ao_3...).");
+
+                obj = state.CachedObjects.FirstOrDefault(o => o.ObjectId == objectId);
+            }
 
             if (obj is null)
                 throw new KeyNotFoundException(
@@ -1654,9 +1667,8 @@ namespace Connector
         }
 
         /// <summary>
-        /// Parses a ThingsBoard key such as "ao_3_supply_temp_sp_value" into its
-        /// BacnetObjectId by extracting the short type alias and instance number
-        /// from the first two underscore-delimited tokens.
+        /// Legacy fallback: parses a ThingsBoard key such as "ao_3_supply_temp_sp_value" 
+        /// into its BacnetObjectId by extracting type and instance.
         /// </summary>
         static bool TryParseKeyToObjectId(string key, out BacnetObjectId result)
         {

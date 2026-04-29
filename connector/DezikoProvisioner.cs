@@ -35,15 +35,19 @@ namespace Connector
         /// for every leaf data-point asset, so the caller can post telemetry directly to assets.
         /// </summary>
         public async Task<Dictionary<string, string>> ProvisionAsync(
-            DezikoTree                 tree,
-            List<BacnetObjectInfo>     cachedObjects,
-            ThingsBoardApi             api,
-            string                     tbDeviceId,
-            string                     assetType,
-            CancellationToken          ct)
+            DezikoTree tree,
+            List<BacnetObjectInfo> cachedObjects,
+            ThingsBoardApi api,
+            string tbDeviceId,
+            string assetType,
+            CancellationToken ct)
         {
             var leafMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            var visited = new HashSet<BacnetObjectId>();
+            var visitedPaths = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            var visitedObjects = new HashSet<BacnetObjectId>();
+
+            // Build a lookup for technical telemetry keys based on object ID
+            var keyPrefixMap = cachedObjects.ToDictionary(o => o.ObjectId, o => o.KeyPrefix);
 
             if (tree.Roots.Count == 0 && cachedObjects.Count == 0)
             {
@@ -53,52 +57,67 @@ namespace Connector
 
             var counters = new Counters();
 
+            // 1. Process the explicit Structured View tree
             foreach (var root in tree.Roots)
             {
                 ct.ThrowIfCancellationRequested();
-                await ProvisionNodeAsync(root, parentAssetId: null, parentName: null, api,
-                                        tbDeviceId, assetType, counters, leafMap, visited, ct);
+                await ProvisionNodeRecursiveAsync(root, null, api, tbDeviceId, assetType, counters, leafMap, visitedPaths, visitedObjects, keyPrefixMap, ct);
             }
 
-            // Provision orphans: objects with a naming path that were NOT reached by the hierarchy walk.
-            // These often occur in controllers like Deziko CC where the structured views are 
-            // difficult to traverse fully.
-            Console.WriteLine($"  [Hierarchy] Tree walk reached {visited.Count} unique objects. Checking {cachedObjects.Count} cached objects for orphans...");
+            // 2. Process all cached objects to catch "orphans" (points with NamingPath but not in Structured View)
+            Console.WriteLine($"  [Hierarchy] Tree walk reached {visitedObjects.Count} unique objects. Processing remaining cached objects...");
             foreach (var obj in cachedObjects)
             {
-                if (visited.Contains(obj.ObjectId)) continue;
-                
-                if (obj.NamingPath.Count < 2) 
-                {
-                    // Console.WriteLine($"  [Hierarchy]   Skipping potential orphan {obj.ObjectId}: NamingPath.Count={obj.NamingPath.Count}");
-                    continue;
-                }
+                if (visitedObjects.Contains(obj.ObjectId)) continue;
+                if (obj.NamingPath.Count == 0) continue;
 
                 ct.ThrowIfCancellationRequested();
 
-                // We try to reconstruct a folder structure from the path.
-                // For orphans, we just create the leaf asset named "Parent / Child".
-                string parentName = obj.NamingPath[^2];
-                string childName  = obj.NamingPath[^1];
-                string assetName  = $"{parentName} / {childName}";
+                // For orphans, we ensure the parent folder path exists
+                var parentPath = obj.NamingPath.Take(obj.NamingPath.Count - 1).ToList();
 
-                string assetId = await api.EnsureAssetAsync(assetName, assetType);
-                counters.Assets++;
+                // Classify the orphan point
+                string effectiveType = Classify(obj.ObjectName);
+                if (effectiveType == "default") effectiveType = assetType;
 
-                // Ensure relation to the device
-                await api.EnsureRelationAsync(tbDeviceId, "DEVICE", assetId, "ASSET");
-                counters.Relations++;
+                string parentAssetId = await EnsurePathAsync(parentPath, api, tbDeviceId, effectiveType, counters, visitedPaths, ct);
 
-                // Create Entity View
-                string viewName = $"{obj.ObjectName} ({assetName})";
-                var telKeys = obj.LogObjectId != null ? new[] { "value" } : Array.Empty<string>();
-                await api.EnsureEntityViewAsync(viewName, assetType, assetId, "ASSET", telKeys, new string[] { });
+                // Create the Entity View for the sensor directly under the parent asset
+                string leafName = obj.NamingPath.Last();
+                if (obj.NamingPath.Count > 1)
+                {
+                    string parentName = obj.NamingPath[^2];
+                    if (!leafName.StartsWith(parentName, StringComparison.OrdinalIgnoreCase))
+                        leafName = $"{parentName} / {leafName}";
+                }
+
+                // Technical telemetry keys (close to BACnet reality)
+                var telKeys = new[] { $"{obj.KeyPrefix}_value", $"{obj.KeyPrefix}_status", $"{obj.KeyPrefix}_alarm", $"{obj.KeyPrefix}_fault" };
+
+                string evId = await api.EnsureEntityViewAsync(
+                    viewName: leafName,
+                    viewType: effectiveType,
+                    sourceEntityId: parentAssetId,
+                    sourceEntityType: "ASSET",
+                    telemetryKeys: telKeys,
+                    serverAttributes: new[] { "bacnet_path", "bacnet_id", "description", "units" },
+                    description: obj.ObjectName);
                 counters.EntityViews++;
 
-                leafMap[obj.KeyPrefix] = assetId;
-                visited.Add(obj.ObjectId);
+                // Set description explicitly to the technical key
+                await api.SetEntityViewAttributesAsync(evId, new Dictionary<string, string>
+                {
+                    ["bacnet_key"] = obj.ObjectName
+                });
 
-                Console.WriteLine($"  [Hierarchy]   Orphan Asset: '{assetName}' (key={obj.KeyPrefix})");
+                // Parent Asset --[Contains]--> Entity View
+                await api.EnsureRelationAsync(parentAssetId, "ASSET", evId, "ENTITY_VIEW");
+                counters.Relations++;
+
+                leafMap[obj.KeyPrefix] = evId;
+                visitedObjects.Add(obj.ObjectId);
+
+                Console.WriteLine($"  [Hierarchy]   Orphan Sensor: '{leafName}' (key={obj.KeyPrefix})");
             }
 
             Console.WriteLine(
@@ -109,144 +128,197 @@ namespace Connector
 
         sealed class Counters { public int Assets; public int Relations; public int EntityViews; }
 
-        // ── Recursive node handler ────────────────────────────────────────────
+        // ── Recursive Path/Node Handler ───────────────────────────────────────
 
-        async Task ProvisionNodeAsync(
-            DezikoNode     node,
-            string?        parentAssetId,
-            string?        parentName,
+        async Task ProvisionNodeRecursiveAsync(
+            DezikoNode node,
+            string? parentAssetId,
             ThingsBoardApi api,
-            string         tbDeviceId,
-            string         assetType,
-            Counters       c,
+            string tbDeviceId,
+            string assetType,
+            Counters c,
             Dictionary<string, string> leafMap,
-            HashSet<BacnetObjectId> visited,
+            Dictionary<string, string> visitedPaths,
+            HashSet<BacnetObjectId> visitedObjects,
+            Dictionary<BacnetObjectId, string> keyPrefixMap,
             CancellationToken ct)
         {
             ct.ThrowIfCancellationRequested();
+            visitedObjects.Add(node.ObjectId);
 
-            // The TB asset name is the friendly name.
-            string assetName = node.FriendlyName;
-            if (string.IsNullOrEmpty(assetName)) assetName = node.ShortName;
-
-            string assetId = await api.EnsureAssetAsync(assetName, assetType);
-            c.Assets++;
-            visited.Add(node.ObjectId);
-            Console.WriteLine($"  [Hierarchy]   Asset: '{assetName}' (key={node.ObjectName})");
-
-            // Set rich attributes on the asset
-            var attrs = new Dictionary<string, string>
+            if (node.IsView)
             {
-                ["bacnet_path"]     = node.NamingPath.Any() ? string.Join(" / ", node.NamingPath) : node.ObjectName,
-                ["bacnet_key"]      = node.ObjectName,
-                ["bacnet_id"]       = node.ObjectId.ToString(),
-                ["bacnet_type"]     = node.IsView
-                                        ? "view"
-                                        : ShortType(node.ObjectId.type),
-                ["description"]     = node.Description,
-                ["profile_name"]    = node.ProfileName,
-            };
+                // Ensure this folder's path exists as an Asset
+                var path = node.NamingPath.Any() ? node.NamingPath : new List<string> { node.ShortName };
 
-            if (!node.IsView)
-            {
-                attrs["bacnet_instance"] = node.ObjectId.instance.ToString();
-                if (!string.IsNullOrEmpty(node.Units))
-                    attrs["units"] = node.Units;
-            }
+                // Dynamic classification for folders
+                string effectiveType = Classify(node.ObjectName);
+                if (effectiveType == "default") effectiveType = assetType;
 
-            await api.SetAssetAttributesAsync(assetId, attrs);
+                string assetId = await EnsurePathAsync(path, api, tbDeviceId, effectiveType, c, visitedPaths, ct, node.ObjectName);
 
-            // Link parent asset → this asset
-            if (parentAssetId is not null)
-            {
-                await api.EnsureRelationAsync(parentAssetId, "ASSET", assetId, "ASSET");
-                c.Relations++;
-            }
-
-            // Recurse into child views; for data-point leaves create a relation to the device
-            foreach (var child in node.Children)
-            {
-                ct.ThrowIfCancellationRequested();
-
-                if (child.IsView)
+                // Set attributes for the folder
+                var attrs = new Dictionary<string, string>
                 {
-                    await ProvisionNodeAsync(child, assetId, assetName, api,
-                                            tbDeviceId, assetType, c, leafMap, visited, ct);
+                    ["bacnet_path"] = string.Join(" / ", path),
+                    ["bacnet_key"] = node.ObjectName,
+                    ["bacnet_id"] = node.ObjectId.ToString(),
+                    ["bacnet_type"] = "view",
+                    ["description"] = node.ObjectName, // Key in description as requested
+                    ["profile_name"] = node.ProfileName,
+                };
+                await api.SetAssetAttributesAsync(assetId, attrs);
+
+                // Recurse into children
+                foreach (var child in node.Children)
+                {
+                    await ProvisionNodeRecursiveAsync(child, assetId, api, tbDeviceId, assetType, c, leafMap, visitedPaths, visitedObjects, keyPrefixMap, ct);
+                }
+            }
+            else
+            {
+                // It's a leaf data-point sensor: create an Entity View directly under the parent asset
+                if (parentAssetId == null) return; // Should not happen for valid hierarchies
+
+                string leafName = node.FriendlyName;
+                if (node.NamingPath.Count > 1)
+                {
+                    string parentName = node.NamingPath[^2];
+                    if (!leafName.StartsWith(parentName, StringComparison.OrdinalIgnoreCase))
+                        leafName = $"{parentName} / {leafName}";
+                }
+
+                if (!keyPrefixMap.TryGetValue(node.ObjectId, out string? keyPrefix))
+                    keyPrefix = $"{ShortType(node.ObjectId.type)}_{node.ObjectId.instance}";
+
+                // Dynamic classification for sensors
+                string effectiveViewType = Classify(node.ObjectName);
+                if (effectiveViewType == "default") effectiveViewType = assetType;
+
+                // Technical keys exposed by the view
+                var telKeys = new[] { $"{keyPrefix}_value", $"{keyPrefix}_status", $"{keyPrefix}_alarm", $"{keyPrefix}_fault" };
+
+                string evId = await api.EnsureEntityViewAsync(
+                    viewName: leafName,
+                    viewType: effectiveViewType,
+                    sourceEntityId: parentAssetId,
+                    sourceEntityType: "ASSET",
+                    telemetryKeys: telKeys,
+                    serverAttributes: new[] { "bacnet_path", "bacnet_id", "description", "units" },
+                    description: node.ObjectName);
+                c.EntityViews++;
+
+                // Set description explicitly to the technical key
+                await api.SetEntityViewAttributesAsync(evId, new Dictionary<string, string>
+                {
+                    ["description"] = node.ObjectName,
+                    ["bacnet_key"] = node.ObjectName
+                });
+
+                // Folder Asset --[Contains]--> Entity View
+                await api.EnsureRelationAsync(parentAssetId, "ASSET", evId, "ENTITY_VIEW");
+                c.Relations++;
+
+                leafMap[keyPrefix] = parentAssetId;
+                Console.WriteLine($"  [Hierarchy]   Sensor: '{leafName}' (Target Asset: {parentAssetId})");
+            }
+        }
+
+        async Task<string> EnsurePathAsync(
+            List<string> path,
+            ThingsBoardApi api,
+            string tbDeviceId,
+            string fallbackType,
+            Counters c,
+            Dictionary<string, string> visitedPaths,
+            CancellationToken ct,
+            string? leafDescription = null)
+        {
+            string? currentParentId = null;
+            string currentPath = "";
+
+            for (int i = 0; i < path.Count; i++)
+            {
+                string segment = path[i];
+                currentPath = i == 0 ? segment : $"{currentPath} / {segment}";
+
+                if (visitedPaths.TryGetValue(currentPath, out string? existingId))
+                {
+                    currentParentId = existingId;
+                    continue;
+                }
+
+                // Try to derive a specific type for this path segment
+                string effectiveType = Classify(segment);
+                if (effectiveType == "default") effectiveType = fallbackType;
+
+                // For the last segment in the path, use the provided description
+                string? segmentDesc = (i == path.Count - 1) ? leafDescription : null;
+
+                ct.ThrowIfCancellationRequested();
+                string assetId = await api.EnsureAssetAsync(segment, effectiveType, segmentDesc);
+                c.Assets++;
+                visitedPaths[currentPath] = assetId;
+
+                // Link to parent asset or device root
+                if (currentParentId != null)
+                {
+                    await api.EnsureRelationAsync(currentParentId, "ASSET", assetId, "ASSET");
+                    c.Relations++;
                 }
                 else
                 {
-                    // Leaf data-point: qualify the name with the parent view name to avoid
-                    // collisions between identically-named points under different views.
-                    string leafName = string.IsNullOrEmpty(assetName)
-                        ? child.FriendlyName
-                        : $"{assetName} / {child.FriendlyName}";
-
-                    string leafId = await api.EnsureAssetAsync(leafName, assetType);
-                    c.Assets++;
-                    visited.Add(child.ObjectId);
-                    Console.WriteLine($"  [Hierarchy]   Leaf:  '{leafName}' ({child.ObjectId} / key={child.ObjectName})");
-
-                    var leafAttrs = new Dictionary<string, string>
-                    {
-                        ["bacnet_path"]     = child.NamingPath.Any() ? string.Join(" / ", child.NamingPath) : child.ObjectName,
-                        ["bacnet_key"]      = child.ObjectName,
-                        ["bacnet_id"]       = child.ObjectId.ToString(),
-                        ["bacnet_type"]     = ShortType(child.ObjectId.type),
-                        ["bacnet_instance"] = child.ObjectId.instance.ToString(),
-                        ["description"]     = child.Description,
-                        ["profile_name"]    = child.ProfileName,
-                    };
-                    if (!string.IsNullOrEmpty(child.Units))
-                        leafAttrs["units"] = child.Units;
-
-                    await api.SetAssetAttributesAsync(leafId, leafAttrs);
-
-                    string keyPrefix = $"{ShortType(child.ObjectId.type)}_{child.ObjectId.instance}";
-                    leafMap[keyPrefix] = leafId;
-
-                    // Asset folder → leaf asset
-                    await api.EnsureRelationAsync(assetId, "ASSET", leafId, "ASSET");
-                    c.Relations++;
-
-                    // Leaf asset → BACnet device (so data flows through in TB dashboards)
-                    await api.EnsureRelationAsync(leafId, "ASSET", tbDeviceId, "DEVICE");
-                    c.Relations++;
-
-                    // The view references the leaf Asset and exposes the live
-                    // 'value' timeseries plus human-readable server attributes.
-                    var evAttrs = new[] { "bacnet_path", "bacnet_key", "bacnet_id", "bacnet_type", "bacnet_instance",
-                                         "description", "profile_name", "units" };
-                    string evId = await api.EnsureEntityViewAsync(
-                        viewName:          leafName,
-                        viewType:          assetType,
-                        sourceEntityId:    leafId,
-                        sourceEntityType:  "ASSET",
-                        telemetryKeys:     child.LogObjectId != null ? new[] { "value" } : Array.Empty<string>(),
-                        serverAttributes:  evAttrs);
-                    c.EntityViews++;
-
-                    // Mirror the asset parent→child relation in Entity View space
-                    await api.EnsureRelationAsync(assetId, "ASSET", evId, "ENTITY_VIEW");
+                    // Root segments link to the device
+                    await api.EnsureRelationAsync(tbDeviceId, "DEVICE", assetId, "ASSET");
                     c.Relations++;
                 }
+
+                currentParentId = assetId;
             }
+
+            return currentParentId!;
         }
 
         // ── Helpers ──────────────────────────────────────────────────────────
 
+        /// <summary>
+        /// Extracts the 3-character technical abbreviation (e.g. BSK, RLT)
+        /// from a technical Siemens ObjectName to determine its type.
+        /// </summary>
+        static string Classify(string technicalName)
+        {
+            if (string.IsNullOrEmpty(technicalName)) return "default";
+
+            // Split into segments (G01'ASP01'RLT001'Status -> [G01, ASP01, RLT001, Status])
+            var segments = technicalName.Split(new[] { '.', '\'' }, StringSplitOptions.RemoveEmptyEntries);
+
+            // Iterate backwards to find the last segment that looks like a technical tag
+            // (starts with at least 3 uppercase chars, e.g. BSK210 -> BSK)
+            for (int i = segments.Length - 1; i >= 0; i--)
+            {
+                string s = segments[i];
+                if (s.Length >= 3 && char.IsUpper(s[0]) && char.IsUpper(s[1]) && char.IsUpper(s[2]))
+                {
+                    return s.Substring(0, 3);
+                }
+            }
+
+            return "default";
+        }
+
         static string ShortType(BacnetObjectTypes t) => t switch
         {
-            BacnetObjectTypes.OBJECT_ANALOG_INPUT        => "ai",
-            BacnetObjectTypes.OBJECT_ANALOG_OUTPUT       => "ao",
-            BacnetObjectTypes.OBJECT_ANALOG_VALUE        => "av",
-            BacnetObjectTypes.OBJECT_BINARY_INPUT        => "bi",
-            BacnetObjectTypes.OBJECT_BINARY_OUTPUT       => "bo",
-            BacnetObjectTypes.OBJECT_BINARY_VALUE        => "bv",
-            BacnetObjectTypes.OBJECT_MULTI_STATE_INPUT   => "mi",
-            BacnetObjectTypes.OBJECT_MULTI_STATE_OUTPUT  => "mo",
-            BacnetObjectTypes.OBJECT_MULTI_STATE_VALUE   => "mv",
-            BacnetObjectTypes.OBJECT_STRUCTURED_VIEW     => "view",
-            _                                            => t.ToString().Replace("OBJECT_", "").ToLowerInvariant(),
+            BacnetObjectTypes.OBJECT_ANALOG_INPUT => "ai",
+            BacnetObjectTypes.OBJECT_ANALOG_OUTPUT => "ao",
+            BacnetObjectTypes.OBJECT_ANALOG_VALUE => "av",
+            BacnetObjectTypes.OBJECT_BINARY_INPUT => "bi",
+            BacnetObjectTypes.OBJECT_BINARY_OUTPUT => "bo",
+            BacnetObjectTypes.OBJECT_BINARY_VALUE => "bv",
+            BacnetObjectTypes.OBJECT_MULTI_STATE_INPUT => "mi",
+            BacnetObjectTypes.OBJECT_MULTI_STATE_OUTPUT => "mo",
+            BacnetObjectTypes.OBJECT_MULTI_STATE_VALUE => "mv",
+            BacnetObjectTypes.OBJECT_STRUCTURED_VIEW => "view",
+            _ => t.ToString().Replace("OBJECT_", "").ToLowerInvariant(),
         };
     }
 }

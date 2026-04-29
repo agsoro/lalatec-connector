@@ -54,12 +54,10 @@ namespace Connector
             }
         }
 
-        /// <summary>Last dot-segment of technical ObjectName.</summary>
-        public string ShortName  => string.IsNullOrWhiteSpace(ObjectName)
+        /// <summary>Last segment of technical ObjectName (handles '.' or ''' separators).</summary>
+        public string ShortName => string.IsNullOrWhiteSpace(ObjectName)
             ? ObjectId.ToString()
-            : ObjectName.Contains('.')
-                ? ObjectName[(ObjectName.LastIndexOf('.') + 1)..]
-                : ObjectName;
+            : ObjectName.Split(new[] { '.', '\'' }, StringSplitOptions.RemoveEmptyEntries).Last();
 
         /// <summary>Human-readable description from PROP_DESCRIPTION (may be empty).</summary>
         public string Description { get; init; } = "";

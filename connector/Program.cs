@@ -303,9 +303,6 @@ namespace Connector
                     if (telemetry.Count > 0)
                         await PublishTelemetryAsync(mqtt, telemetry);
 
-                    // Route telemetry to individual leaf assets via REST
-                    await PostAssetTelemetryAsync(device.Name, telemetry, tbApi, leafMaps);
-
                     if (attributes.Count > 0 || telemetry.Count > 0)
                         Console.WriteLine(
                             $"[{DateTime.Now:HH:mm:ss}] [{reader.DriverName,-10}] {device.Name,-38} " +
@@ -332,10 +329,33 @@ namespace Connector
                 }
 
                 if (telemetry.Count > 0)
+                {
                     await PublishTelemetryAsync(mqtt, telemetry);
 
-                // Route telemetry to individual leaf assets via REST
-                await PostAssetTelemetryAsync(device.Name, telemetry, tbApi, leafMaps);
+                    // Post to Assets via REST (so Entity Views pointing to Assets have data)
+                    if (leafMaps.TryGetValue(device.Name, out var leafMap))
+                    {
+                        // Group telemetry by asset
+                        var perAsset = new Dictionary<string, Dictionary<string, double>>();
+                        foreach (var kv in telemetry)
+                        {
+                            // Key is e.g. "ai_1_value". Prefix is the technical key.
+                            // We find the prefix by stripping the property suffix.
+                            int lastUnderscore = kv.Key.LastIndexOf('_');
+                            if (lastUnderscore <= 0) continue;
+                            string prefix = kv.Key.Substring(0, lastUnderscore);
+                            
+                            if (leafMap.TryGetValue(prefix, out string? assetId))
+                            {
+                                if (!perAsset.ContainsKey(assetId)) perAsset[assetId] = new();
+                                perAsset[assetId][kv.Key] = kv.Value;
+                            }
+                        }
+
+                        foreach (var entry in perAsset)
+                            _ = tbApi.PostAssetTelemetryBatchAsync(entry.Key, entry.Value);
+                    }
+                }
 
                 if (attributes.Count > 0)
                     await PublishAttributesAsync(mqtt, attributes);
@@ -372,61 +392,6 @@ namespace Connector
             }
         }
 
-        // =====================================================================
-        //  Asset telemetry routing (REST)
-        // =====================================================================
-
-        /// <summary>
-        /// For each telemetry key, extracts the key-prefix (e.g. "ai_1" from
-        /// "ai_1_object_analog_input_1_value"), looks it up in the device's leafMap,
-        /// and posts the value to the matching asset via the ThingsBoard REST API.
-        /// Keys that have no matching asset (e.g. Modbus devices) are silently skipped.
-        /// </summary>
-        static async Task PostAssetTelemetryAsync(
-            string deviceName,
-            Telemetry telemetry,
-            ThingsBoardApi tbApi,
-            Dictionary<string, Dictionary<string, string>> leafMaps)
-        {
-            if (telemetry.Count == 0) return;
-
-            Dictionary<string, string>? leafMap;
-            lock (leafMaps)
-            {
-                if (!leafMaps.TryGetValue(deviceName, out leafMap) || leafMap.Count == 0)
-                    return;
-            }
-
-            // Group values by assetId for batched POSTing
-            var byAsset = new Dictionary<string, Dictionary<string, double>>();
-
-            foreach (var kv in telemetry)
-            {
-                // Key format: "{prefix}_{...}_value"  e.g. "ai_1_object_analog_input_1_value"
-                // prefix = first two underscore-delimited tokens: type alias + instance
-                var parts = kv.Key.Split('_');
-                if (parts.Length < 2) continue;
-                string prefix = $"{parts[0]}_{parts[1]}";
-
-                if (!leafMap.TryGetValue(prefix.ToLowerInvariant(), out var assetId)) continue;
-
-                if (!byAsset.TryGetValue(assetId, out var bucket))
-                    byAsset[assetId] = bucket = new Dictionary<string, double>();
-
-                // Publish as "value" (short canonical key) on the asset itself
-                bucket["value"] = Convert.ToDouble(kv.Value);
-            }
-
-            foreach (var (assetId, vals) in byAsset)
-            {
-                try   { await tbApi.PostAssetTelemetryBatchAsync(assetId, vals); }
-                catch (Exception ex)
-                {
-                    Console.Error.WriteLine(
-                        $"  [TB] WARN: asset telemetry failed for {assetId}: {ex.Message}");
-                }
-            }
-        }
 
         // =====================================================================
         //  MQTT publish helpers

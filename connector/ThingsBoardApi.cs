@@ -133,7 +133,7 @@ namespace Connector
         /// Creates a ThingsBoard Asset with the given name and type if it does not exist yet.
         /// Returns the asset UUID.  Idempotent.
         /// </summary>
-        public async Task<string> EnsureAssetAsync(string assetName, string assetType)
+        public async Task<string> EnsureAssetAsync(string assetName, string assetType, string? description = null)
         {
             string? existing = await FindAssetIdAsync(assetName);
             if (existing is not null)
@@ -143,6 +143,7 @@ namespace Connector
             {
                 name = assetName,
                 type = assetType,
+                description = description ?? "",
             });
             resp.EnsureSuccessStatusCode();
 
@@ -269,17 +270,18 @@ namespace Connector
             string   sourceEntityId,
             string   sourceEntityType,
             string[] telemetryKeys,
-            string[] serverAttributes)
+            string[] serverAttributes,
+            string?  description = null)
         {
-            string? existing = await FindEntityViewIdAsync(viewName);
-            if (existing is not null)
-                return existing;
-
+            string? existingId = await FindEntityViewIdAsync(viewName);
+            
             var body = new
             {
+                id       = existingId != null ? new { id = existingId, entityType = "ENTITY_VIEW" } : null,
                 name     = viewName,
                 type     = viewType,
                 entityId = new { id = sourceEntityId, entityType = sourceEntityType },
+                description = description ?? "",
                 keys     = new
                 {
                     timeseries = telemetryKeys,
@@ -299,8 +301,23 @@ namespace Connector
 
             var result = await resp.Content.ReadFromJsonAsync<JsonElement>();
             string id  = result.GetProperty("id").GetProperty("id").GetString()!;
-            Console.WriteLine($"  [TB] EntityView created → {viewName}");
+            
+            if (existingId == null)
+                Console.WriteLine($"  [TB] EntityView created → {viewName}");
+            else
+                Console.WriteLine($"  [TB] EntityView updated → {viewName}");
+                
             return id;
+        }
+
+        /// <summary>
+        /// Posts a flat key-value dictionary as SERVER_SCOPE attributes on an Entity View.
+        /// </summary>
+        public async Task SetEntityViewAttributesAsync(string evId, Dictionary<string, string> attrs)
+        {
+            var resp = await _http.PostAsJsonAsync(
+                $"/api/plugins/telemetry/ENTITY_VIEW/{evId}/SERVER_SCOPE", attrs);
+            resp.EnsureSuccessStatusCode();
         }
 
         public async Task<string?> FindEntityViewIdAsync(string name)
