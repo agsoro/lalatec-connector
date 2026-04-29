@@ -999,7 +999,6 @@ namespace Connector
                                              map.ContainsKey(alarmObjId) ||
                                              map.ContainsKey(normalized.ToLowerInvariant()) ||
                                              map.ContainsKey(alarmObjId.ToLowerInvariant());
-                            Console.WriteLine($"    [Debug] Alarm type={aType} object={alarmObjId} norm={normalized} isMapped={isMapped}");
 
                             if (isMapped)
                             {
@@ -1011,14 +1010,9 @@ namespace Connector
                                 }
                             }
                         }
-                        else
-                        {
-                             Console.WriteLine($"    [Debug] Alarm type={aType} has no 'object' detail.");
-                        }
                     } catch (Exception ex) { Console.WriteLine($"    [Error] Cleanup pass failed for an alarm: {ex.Message}"); }
                 }
                 if (clearedCount > 0) Console.WriteLine($"  [BACnet] Cleanup pass for '{deviceName}': {clearedCount} stale device alarms cleared.");
-                else Console.WriteLine($"  [BACnet] Cleanup pass for '{deviceName}': No stale device alarms cleared.");
 
                 // Re-evaluate all alarms to ensure they are linked to the correct assets
                 foreach (var item in toRefresh)

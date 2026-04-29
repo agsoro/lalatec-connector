@@ -379,7 +379,10 @@ namespace Connector
                     if (result.Count > 0) return result;
                 }
             }
-            catch { /* fallback to index */ }
+            catch (Exception ex)
+            {
+                 Console.WriteLine($"  [Hierarchy] Bulk SubordinateList read failed for {viewId}: {ex.Message} – using index fallback…");
+            }
 
             try
             {
