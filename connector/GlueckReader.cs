@@ -40,7 +40,7 @@ namespace Connector
 
                 return new Telemetry
                 {
-                    ["active_allowed_power_pct"] = Math.Round(pct, 2),
+                    [TelemetryKeys.PowerAllowedPct] = Math.Round(pct, 2),
                 };
             });
         }

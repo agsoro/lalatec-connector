@@ -21,8 +21,8 @@ namespace Connector
     class JanitzaReader : IDeviceReader
     {
         const ushort REG_TOTAL_ACTIVE_POWER_W = 19020;
-        const ushort REG_IMPORT_ENERGY_WH     = 19060;
-        const ushort REG_EXPORT_ENERGY_WH     = 19062;
+        const ushort REG_IMPORT_ENERGY_WH = 19060;
+        const ushort REG_EXPORT_ENERGY_WH = 19062;
 
         public string DriverName => "Janitza";
 
@@ -38,9 +38,9 @@ namespace Connector
 
                 return new Telemetry
                 {
-                    ["power_kw"]   = Math.Round(ModbusHelper.RegsToFloat(pwRegs, 0) / 1000.0, 3),
-                    ["import_kwh"] = Math.Round(ModbusHelper.RegsToFloat(enRegs, 0) / 1000.0, 3),
-                    ["export_kwh"] = Math.Round(ModbusHelper.RegsToFloat(enRegs, 2) / 1000.0, 3),
+                    [TelemetryKeys.PowerKw] = Math.Round(ModbusHelper.RegsToFloat(pwRegs, 0) / 1000.0, 3),
+                    [TelemetryKeys.EnergyImportKwh] = Math.Round(ModbusHelper.RegsToFloat(enRegs, 0) / 1000.0, 3),
+                    [TelemetryKeys.EnergyExportKwh] = Math.Round(ModbusHelper.RegsToFloat(enRegs, 2) / 1000.0, 3),
                 };
             });
         }

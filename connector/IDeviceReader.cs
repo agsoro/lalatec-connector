@@ -67,6 +67,30 @@ namespace Connector
             return BitConverter.ToSingle(b, 0);
         }
 
+        public static int RegsToInt32(ushort[] regs, int offset)
+        {
+            var b = new byte[]
+            {
+                (byte)(regs[offset]     >> 8), (byte)(regs[offset]     & 0xFF),
+                (byte)(regs[offset + 1] >> 8), (byte)(regs[offset + 1] & 0xFF),
+            };
+            if (BitConverter.IsLittleEndian) Array.Reverse(b);
+            return BitConverter.ToInt32(b, 0);
+        }
+
+        public static ulong RegsToUInt64(ushort[] regs, int offset)
+        {
+            var b = new byte[]
+            {
+                (byte)(regs[offset]     >> 8), (byte)(regs[offset]     & 0xFF),
+                (byte)(regs[offset + 1] >> 8), (byte)(regs[offset + 1] & 0xFF),
+                (byte)(regs[offset + 2] >> 8), (byte)(regs[offset + 2] & 0xFF),
+                (byte)(regs[offset + 3] >> 8), (byte)(regs[offset + 3] & 0xFF),
+            };
+            if (BitConverter.IsLittleEndian) Array.Reverse(b);
+            return BitConverter.ToUInt64(b, 0);
+        }
+
         // =====================================================================
         //  Write helpers
         // =====================================================================
