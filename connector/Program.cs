@@ -20,7 +20,7 @@ using MQTTnet.Extensions.ManagedClient;
 
 namespace Connector
 {
-    using Telemetry  = Dictionary<string, double>;
+    using Telemetry  = Dictionary<string, object>;
     using Attributes = Dictionary<string, string>;
 
     class Program
@@ -336,7 +336,7 @@ namespace Connector
                     if (leafMaps.TryGetValue(device.Name, out var leafMap))
                     {
                         // Group telemetry by asset
-                        var perAsset = new Dictionary<string, Dictionary<string, double>>();
+                        var perAsset = new Dictionary<string, Dictionary<string, object>>();
                         foreach (var kv in telemetry)
                         {
                             // Key is e.g. "ai_1_value". Prefix is the technical key.

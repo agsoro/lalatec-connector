@@ -6,7 +6,7 @@ using NModbus;
 
 namespace Connector
 {
-    using Telemetry = Dictionary<string, double>;
+    using Telemetry = Dictionary<string, object>;
 
     /// <summary>
     /// Implement one class per device type.

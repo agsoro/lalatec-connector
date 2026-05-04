@@ -95,7 +95,7 @@ namespace Connector
         async Task<string?> FindDeviceIdInternalAsync(string name)
         {
             var resp = await _http.GetAsync(
-                $"/api/tenant/devices?pageSize=10&page=0&textSearch={HttpUtility.UrlEncode(name)}");
+                $"/api/tenant/devices?pageSize=1000&page=0&textSearch={HttpUtility.UrlEncode(name)}");
             if (!resp.IsSuccessStatusCode) return null;
 
             var body = await resp.Content.ReadFromJsonAsync<JsonElement>();
@@ -135,21 +135,27 @@ namespace Connector
         /// </summary>
         public async Task<string> EnsureAssetAsync(string assetName, string assetType, string? description = null)
         {
-            string? existing = await FindAssetIdAsync(assetName);
-            if (existing is not null)
-                return existing;
-
-            var resp = await _http.PostAsJsonAsync("/api/asset", new
+            string? existingId = await FindAssetIdAsync(assetName);
+            
+            var body = new
             {
+                id   = existingId != null ? new { id = existingId, entityType = "ASSET" } : null,
                 name = assetName,
                 type = assetType,
                 description = description ?? "",
-            });
+            };
+
+            var resp = await _http.PostAsJsonAsync("/api/asset", body);
             resp.EnsureSuccessStatusCode();
 
-            var body = await resp.Content.ReadFromJsonAsync<JsonElement>();
-            string id = body.GetProperty("id").GetProperty("id").GetString()!;
-            Console.WriteLine($"  [TB] Asset created  → {assetName}  ({assetType})");
+            var result = await resp.Content.ReadFromJsonAsync<JsonElement>();
+            string id = result.GetProperty("id").GetProperty("id").GetString()!;
+            
+            if (existingId == null)
+                Console.WriteLine($"  [TB] Asset created  → {assetName}  ({assetType})");
+            else
+                Console.WriteLine($"  [TB] Asset updated  → {assetName}  ({assetType})");
+
             return id;
         }
 
@@ -223,12 +229,12 @@ namespace Connector
         /// Posts a single numeric value as a timestamped time-series data point on an Asset.
         /// Uses the ThingsBoard telemetry API: POST /api/plugins/telemetry/ASSET/{id}/timeseries/ANY
         /// </summary>
-        public async Task PostAssetTelemetryAsync(string assetId, string key, double value, long? ts = null)
+        public async Task PostAssetTelemetryAsync(string assetId, string key, object value, long? ts = null)
         {
             var payload = new
             {
                 ts     = ts ?? DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-                values = new Dictionary<string, double> { [key] = value },
+                values = new Dictionary<string, object> { [key] = value },
             };
             var resp = await _http.PostAsJsonAsync(
                 $"/api/plugins/telemetry/ASSET/{assetId}/timeseries/ANY", payload);
@@ -241,7 +247,7 @@ namespace Connector
         /// <summary>
         /// Posts a batch of key-value telemetry values to an Asset in a single request.
         /// </summary>
-        public async Task PostAssetTelemetryBatchAsync(string assetId, Dictionary<string, double> values)
+        public async Task PostAssetTelemetryBatchAsync(string assetId, Dictionary<string, object> values)
         {
             if (values.Count == 0) return;
             var payload = new
@@ -323,7 +329,7 @@ namespace Connector
         public async Task<string?> FindEntityViewIdAsync(string name)
         {
             var resp = await _http.GetAsync(
-                $"/api/tenant/entityViews?pageSize=20&page=0&textSearch={System.Web.HttpUtility.UrlEncode(name)}");
+                $"/api/tenant/entityViews?pageSize=1000&page=0&textSearch={System.Web.HttpUtility.UrlEncode(name)}");
             if (!resp.IsSuccessStatusCode) return null;
 
             var body = await resp.Content.ReadFromJsonAsync<JsonElement>();
@@ -390,7 +396,7 @@ namespace Connector
         public async Task<List<JsonElement>> GetActiveAlarmsAsync(string entityId, string entityType = "DEVICE")
         {
             await RefreshIfNeededAsync();
-            var resp = await _http.GetAsync($"/api/alarm/{entityType}/{entityId}?pageSize=100&page=0&status=ACTIVE_UNACK");
+            var resp = await _http.GetAsync($"/api/alarm/{entityType}/{entityId}?pageSize=1000&page=0&status=ACTIVE_UNACK");
             if (!resp.IsSuccessStatusCode) return new List<JsonElement>();
             
             var doc = await resp.Content.ReadFromJsonAsync<JsonElement>();

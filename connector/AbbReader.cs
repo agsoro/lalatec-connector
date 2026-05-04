@@ -14,7 +14,7 @@ using System.Collections.Generic;
 
 namespace Connector
 {
-    using Telemetry = Dictionary<string, double>;
+    using Telemetry = Dictionary<string, object>;
 
     class AbbReader : IDeviceReader
     {

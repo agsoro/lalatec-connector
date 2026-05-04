@@ -29,7 +29,7 @@ using System.Collections.Concurrent;
 
 namespace Connector
 {
-    using Telemetry = Dictionary<string, double>;
+    using Telemetry = Dictionary<string, object>;
     using Attributes = Dictionary<string, string>;
 
     /// <summary>
@@ -39,7 +39,7 @@ namespace Connector
     class TelemetryConflator : IDisposable
     {
         private readonly Func<Telemetry, Task> _publisher;
-        private readonly ConcurrentDictionary<string, double> _buffer = new();
+        private readonly ConcurrentDictionary<string, object> _buffer = new();
         private readonly System.Threading.Timer _timer;
         private int _isFlushing = 0;
 
@@ -62,9 +62,12 @@ namespace Connector
             {
                 if (_buffer.IsEmpty) return;
                 var snapshot = new Telemetry();
-                foreach (var key in _buffer.Keys)
-                    if (_buffer.TryRemove(key, out double val))
-                        snapshot[key] = val;
+                var keys = _buffer.Keys.ToList();
+                foreach (var k in keys)
+                {
+                    if (_buffer.TryRemove(k, out var val))
+                        snapshot[k] = val;
+                }
 
                 if (snapshot.Count > 0)
                 {
@@ -105,6 +108,7 @@ namespace Connector
     //  Discovered object descriptor (cached after discovery)
     // =========================================================================
     record BacnetObjectInfo(
+        uint DeviceId,
         BacnetObjectId ObjectId,
         string ObjectName,           // technical path (from PROP_OBJECT_NAME)
         List<string> NamingPath,           // friendly path segments (from prop 4397)
@@ -113,11 +117,12 @@ namespace Connector
         string ProfileName = "",   // from PROP_PROFILE_NAME (168)
         bool Commandable = false, // true when PROP_PRIORITY_ARRAY present
         int Category = -1,    // from PROP_CATEGORY (4941)
-        BacnetObjectId? LogObjectId = null   // from PROP_TREND_LOG_REFERENCE (4452)
+        BacnetObjectId? LogObjectId = null,   // from PROP_TREND_LOG_REFERENCE (4452)
+        List<string>? StateText = null // from PROP_STATE_TEXT (110)
     )
     {
-        /// <summary>Sanitised technical ObjectName used as the key prefix, e.g. "g01_asp01_rlt001_t_su".</summary>
-        public string KeyPrefix => Sanitise(ObjectName);
+        /// <summary>Sanitised technical ObjectName used as the key prefix, e.g. "dev123_g01_asp01_rlt001_t_su".</summary>
+        public string KeyPrefix => $"dev{DeviceId}_{Sanitise(ObjectName)}";
 
         public static string ShortTypeName(BacnetObjectTypes t) => t switch
         {
@@ -208,7 +213,7 @@ namespace Connector
             {
                 Console.WriteLine($"  [BACnet] Discovering objects on {device.Name}…");
                 var all = DiscoverObjects(client, address, device.BacnetDeviceId.Value, cfg);
-                var filtered = ApplyFilter(client, address, all, cfg.Filter);
+                var filtered = ApplyFilter(client, address, all, cfg.Filter, device.BacnetDeviceId.Value);
                 state.CachedObjects = filtered;
                 state.LastDiscovery = DateTime.UtcNow;
                 state.DiscoveryDone = true;
@@ -257,16 +262,12 @@ namespace Connector
             {
                 var values = ReadObjectProperties(client, address, obj.ObjectId, allPropIds);
 
-                // Telemetry - only if Trend Log is configured
-                if (obj.LogObjectId != null)
+                foreach (var propId in telPropIds)
                 {
-                    foreach (var propId in telPropIds)
+                    if (values.TryGetValue(propId, out var raw))
                     {
-                        if (values.TryGetValue(propId, out var raw) && TryToDouble(raw, out double d))
-                        {
-                            string key = $"{obj.KeyPrefix}_{PropSuffix(propId)}";
-                            result.Telemetry[key] = Math.Round(d, 4);
-                        }
+                        string key = $"{obj.KeyPrefix}_{PropSuffix(propId)}";
+                        result.Telemetry[key] = FormatValue(obj, raw);
                     }
                 }
 
@@ -319,49 +320,66 @@ namespace Connector
             var deviceObjId = new BacnetObjectId(BacnetObjectTypes.OBJECT_DEVICE, deviceId);
             var objectIds = new List<BacnetObjectId>();
 
-            // Try reading the whole list at once first
+            // 1. Always read the count first (Index 0)
+            uint count = 0;
             try
             {
-                if (client.ReadPropertyRequest(address, deviceObjId,
-                        BacnetPropertyIds.PROP_OBJECT_LIST, out IList<BacnetValue> listValues))
+                if (!client.ReadPropertyRequest(address, deviceObjId,
+                        BacnetPropertyIds.PROP_OBJECT_LIST, out IList<BacnetValue> countVal,
+                        arrayIndex: 0))
                 {
-                    foreach (var v in listValues)
-                        if (v.Value is BacnetObjectId oid)
-                            objectIds.Add(oid);
-
+                    Console.Error.WriteLine("  [BACnet] Could not read object list length. Aborting discovery.");
                     return objectIds;
                 }
+                count = Convert.ToUInt32(countVal[0].Value);
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"  [BACnet] Bulk PROP_OBJECT_LIST read failed: {ex.Message}");
-            }
-
-            // Fallback: some devices segment PROP_OBJECT_LIST – read index 0 for count
-            // then read each entry by index (array index 1-based per BACnet spec)
-            Console.WriteLine("  [BACnet] PROP_OBJECT_LIST bulk read failed – using index fallback…");
-
-            if (!client.ReadPropertyRequest(address, deviceObjId,
-                    BacnetPropertyIds.PROP_OBJECT_LIST, out IList<BacnetValue> countVal,
-                    arrayIndex: 0))
-            {
-                Console.Error.WriteLine("  [BACnet] Could not read object list length.");
+                Console.Error.WriteLine($"  [BACnet] Failed to read object list count: {ex.Message}");
                 return objectIds;
             }
+            Console.WriteLine($"  [BACnet] Device reports {count} total objects.");
 
-            uint count = Convert.ToUInt32(countVal[0].Value);
-            Console.WriteLine($"  [BACnet] Reading {count} objects by index…");
+            // 2. If the list is small, try a fast bulk read
+            if (count < 50)
+            {
+                try
+                {
+                    if (client.ReadPropertyRequest(address, deviceObjId,
+                            BacnetPropertyIds.PROP_OBJECT_LIST, out IList<BacnetValue> listValues))
+                    {
+                        foreach (var v in listValues)
+                            if (v.Value is BacnetObjectId oid)
+                                objectIds.Add(oid);
+
+                        if (objectIds.Count >= count) return objectIds;
+                        
+                        Console.WriteLine($"  [BACnet] Bulk read truncated ({objectIds.Count}/{count}) – falling back to index read.");
+                        objectIds.Clear();
+                    }
+                }
+                catch { /* fallback to index read */ }
+            }
+
+            // 3. Reliable index-by-index read (essential for large lists without segmentation)
+            Console.WriteLine($"  [BACnet] Reading {count} objects index-by-index to avoid UDP fragmentation...");
 
             for (uint i = 1; i <= count; i++)
             {
-                if (client.ReadPropertyRequest(address, deviceObjId,
-                        BacnetPropertyIds.PROP_OBJECT_LIST, out IList<BacnetValue> entry,
-                        arrayIndex: i)
-                    && entry.Count > 0
-                    && entry[0].Value is BacnetObjectId eid)
+                try
                 {
-                    objectIds.Add(eid);
+                    if (client.ReadPropertyRequest(address, deviceObjId,
+                            BacnetPropertyIds.PROP_OBJECT_LIST, out IList<BacnetValue> entry,
+                            arrayIndex: i)
+                        && entry.Count > 0
+                        && entry[0].Value is BacnetObjectId eid)
+                    {
+                        objectIds.Add(eid);
+                    }
                 }
+                catch { /* skip broken entry */ }
+                
+                if (i % 100 == 0) Console.WriteLine($"  [BACnet] ... discovered {i}/{count} objects");
             }
 
             return objectIds;
@@ -416,7 +434,8 @@ namespace Connector
         // =====================================================================
         static List<BacnetObjectInfo> ApplyFilter(
             BacnetClient client, BacnetAddress address,
-            List<BacnetObjectId> candidates, BacnetFilterConfig filter)
+            List<BacnetObjectId> candidates, BacnetFilterConfig filter,
+            uint deviceId)
         {
             // Build type allowlist (null = accept all)
             HashSet<BacnetObjectTypes>? allowedTypes = null;
@@ -504,11 +523,44 @@ namespace Connector
                 // 9. Profile Name (standard 168)
                 string profileName = ReadStringProp(client, address, oid, PropProfileName) ?? "";
 
-                result.Add(new BacnetObjectInfo(oid, objectName, namingPath, nameExt, description, profileName, commandable, category, logId));
+                // 10. State Text (Standard 110) for Multi-State objects
+                List<string>? stateText = null;
+                if (IsMultiState(oid.type))
+                {
+                    stateText = ReadStringListProp(client, address, oid, BacnetPropertyIds.PROP_STATE_TEXT);
+                    if (stateText.Count > 0)
+                        Console.WriteLine($"    [BACnet]   Found {stateText.Count} state labels for {oid}");
+                }
+                // 11. Inactive/Active Text (Standard 46/4) for Binary objects
+                else if (IsBinary(oid.type))
+                {
+                    string inactive = ReadStringProp(client, address, oid, BacnetPropertyIds.PROP_INACTIVE_TEXT);
+                    string active = ReadStringProp(client, address, oid, BacnetPropertyIds.PROP_ACTIVE_TEXT);
+                    if (!string.IsNullOrEmpty(inactive) || !string.IsNullOrEmpty(active))
+                    {
+                        stateText = new List<string> {
+                            string.IsNullOrEmpty(inactive) ? "0" : inactive,
+                            string.IsNullOrEmpty(active) ? "1" : active
+                        };
+                        Console.WriteLine($"    [BACnet]   Found binary labels for {oid}: {stateText[0]} / {stateText[1]}");
+                    }
+                }
+
+                result.Add(new BacnetObjectInfo(deviceId, oid, objectName, namingPath, nameExt, description, profileName, commandable, category, logId, stateText));
             }
 
             return result;
         }
+
+        static bool IsMultiState(BacnetObjectTypes t) => t is
+            BacnetObjectTypes.OBJECT_MULTI_STATE_INPUT or
+            BacnetObjectTypes.OBJECT_MULTI_STATE_OUTPUT or
+            BacnetObjectTypes.OBJECT_MULTI_STATE_VALUE;
+
+        static bool IsBinary(BacnetObjectTypes t) => t is
+            BacnetObjectTypes.OBJECT_BINARY_INPUT or
+            BacnetObjectTypes.OBJECT_BINARY_OUTPUT or
+            BacnetObjectTypes.OBJECT_BINARY_VALUE;
 
         public static string ReadStringProp(BacnetClient client, BacnetAddress address, BacnetObjectId oid, BacnetPropertyIds propId)
         {
@@ -1005,7 +1057,7 @@ namespace Connector
                             // In many implementations, it's returned as a list of values: [timestamp, value, status]
                             if (rec.Value is IList<BacnetValue> parts && parts.Count >= 2)
                             {
-                                if (parts[0].Value is DateTime dt && TryToDouble(parts[1].Value, out double val))
+                                if (parts[0].Value is DateTime dt)
                                 {
                                     long ts = new DateTimeOffset(dt).ToUnixTimeMilliseconds();
 
@@ -1018,7 +1070,8 @@ namespace Connector
 
                                     if (assetId != null)
                                     {
-                                        await tbApi.PostAssetTelemetryAsync(assetId, "value", val, ts);
+                                        var formatted = FormatValue(obj, parts[1].Value);
+                                        await tbApi.PostAssetTelemetryAsync(assetId, "value", formatted, ts);
                                         synced++;
                                     }
                                 }
@@ -1053,6 +1106,24 @@ namespace Connector
             }
             try { result = Math.Round(Convert.ToDouble(v), 6); return true; }
             catch { result = 0; return false; }
+        }
+
+        static object FormatValue(BacnetObjectInfo obj, object? raw)
+        {
+            if (raw == null) return "";
+            if (obj.StateText != null && obj.StateText.Count > 0 && TryToDouble(raw, out double d))
+            {
+                int val = (int)d;
+                int idx = IsBinary(obj.ObjectId.type) ? val : val - 1;
+
+                if (idx >= 0 && idx < obj.StateText.Count)
+                    return obj.StateText[idx];
+            }
+
+            if (TryToDouble(raw, out double d2))
+                return Math.Round(d2, 4);
+
+            return raw.ToString() ?? "";
         }
 
         // ── Per-device mutable discovery state ───────────────────────────────
@@ -1285,11 +1356,16 @@ namespace Connector
                     foreach (var pv in values)
                     {
                         var propId = (BacnetPropertyIds)pv.property.propertyIdentifier;
-                        if (pv.value?.Count > 0 && TryToDouble(pv.value[0].Value, out double d))
+                        if (pv.value?.Count > 0)
                         {
-                            tel[$"{objInfo.KeyPrefix}_{PropSuffix(propId)}"] = Math.Round(d, 4);
-                            lock (_stateLock)
-                                state.CovValues[monitoredObjId] = new CovSnapshot(d, DateTime.UtcNow);
+                            var raw = pv.value[0].Value;
+                            tel[$"{objInfo.KeyPrefix}_{PropSuffix(propId)}"] = FormatValue(objInfo, raw);
+
+                            if (TryToDouble(raw, out double d))
+                            {
+                                lock (_stateLock)
+                                    state.CovValues[monitoredObjId] = new CovSnapshot(d, DateTime.UtcNow);
+                            }
                         }
                     }
 
@@ -1345,7 +1421,7 @@ namespace Connector
         {
             Console.WriteLine($"  [BACnet] Discovering objects on {device.Name}…");
             var all = DiscoverObjects(client, address, device.BacnetDeviceId!.Value, cfg);
-            var filtered = ApplyFilter(client, address, all, cfg.Filter);
+            var filtered = ApplyFilter(client, address, all, cfg.Filter, device.BacnetDeviceId!.Value);
 
             lock (_stateLock)
             {
@@ -1483,7 +1559,7 @@ namespace Connector
                     {
                         // PROP_PRESENT_VALUE is the only telemetry property read via COV
                         string key = $"{obj.KeyPrefix}_{PropSuffix(BacnetPropertyIds.PROP_PRESENT_VALUE)}";
-                        result.Telemetry[key] = Math.Round(snap.Value, 4);
+                        result.Telemetry[key] = FormatValue(obj, snap.Value);
                     }
                 }
             }
@@ -1498,9 +1574,9 @@ namespace Connector
                     var vals = ReadObjectProperties(
                         state.CovClient, state.CovAddress!, obj.ObjectId, telPropIds);
                     foreach (var p in telPropIds)
-                        if (vals.TryGetValue(p, out var raw) && TryToDouble(raw, out double d))
+                        if (vals.TryGetValue(p, out var raw))
                             result.Telemetry[$"{obj.KeyPrefix}_{PropSuffix(p)}"] =
-                                Math.Round(d, 4);
+                                FormatValue(obj, raw);
                 }
             }
 

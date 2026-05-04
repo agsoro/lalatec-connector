@@ -183,20 +183,24 @@ namespace Connector
 
             foreach (var childId in subordinates)
             {
-                if (childId.type == BacnetObjectTypes.OBJECT_STRUCTURED_VIEW)
+                try
                 {
-                    // Sub-folder: recurse
-                    var child = WalkView(client, address, childId, visited, depth + 1);
-                    if (child is not null)
-                        node.Children.Add(child);
+                    if (childId.type == BacnetObjectTypes.OBJECT_STRUCTURED_VIEW)
+                    {
+                        // Sub-folder: recurse
+                        var child = WalkView(client, address, childId, visited, depth + 1);
+                        if (child is not null)
+                            node.Children.Add(child);
+                    }
+                    else if (childId.type != BacnetObjectTypes.OBJECT_DEVICE)
+                    {
+                        // Data-point leaf
+                        var leaf = ReadLeafNode(client, address, childId, visited);
+                        if (leaf is not null)
+                            node.Children.Add(leaf);
+                    }
                 }
-                else if (childId.type != BacnetObjectTypes.OBJECT_DEVICE)
-                {
-                    // Data-point leaf
-                    var leaf = ReadLeafNode(client, address, childId, visited);
-                    if (leaf is not null)
-                        node.Children.Add(leaf);
-                }
+                catch { /* skip broken child */ }
             }
 
             return node;
@@ -209,38 +213,45 @@ namespace Connector
         {
             if (!visited.Add(oid)) return null;
 
-            string objectName = ReadStringProp(client, address, oid,
-                                               BacnetPropertyIds.PROP_OBJECT_NAME)
-                                ?? oid.ToString();
-
-            string description = ReadStringProp(client, address, oid,
-                                                BacnetPropertyIds.PROP_DESCRIPTION)
-                                 ?? "";
-
-            string profileName = ReadStringProp(client, address, oid,
-                                                PropProfileName)
-                                 ?? "";
-
-            // PROP_UNITS is an enum value – read as raw and convert to string
-            string units = ReadUnitsProp(client, address, oid);
-            
-            ReadObjectIdProp(client, address, oid, PropTrendLogReference, out var logId);
-
-            var namingPath = ReadStringListProp(client, address, oid, PropNamingPath);
-            string nameExt = ReadStringProp(client, address, oid, PropNameExtension) ?? "";
-
-            return new DezikoNode
+            try
             {
-                ObjectId      = oid,
-                ObjectName    = objectName,
-                NamingPath    = namingPath,
-                NameExtension = nameExt,
-                Description   = description,
-                ProfileName   = profileName,
-                Units         = units,
-                IsView        = false,
-                LogObjectId   = logId,
-            };
+                string objectName = ReadStringProp(client, address, oid,
+                                                   BacnetPropertyIds.PROP_OBJECT_NAME)
+                                    ?? oid.ToString();
+
+                string description = ReadStringProp(client, address, oid,
+                                                    BacnetPropertyIds.PROP_DESCRIPTION)
+                                     ?? "";
+
+                string profileName = ReadStringProp(client, address, oid,
+                                                    PropProfileName)
+                                     ?? "";
+
+                // PROP_UNITS is an enum value – read as raw and convert to string
+                string units = ReadUnitsProp(client, address, oid);
+                
+                ReadObjectIdProp(client, address, oid, PropTrendLogReference, out var logId);
+
+                var namingPath = ReadStringListProp(client, address, oid, PropNamingPath);
+                string nameExt = ReadStringProp(client, address, oid, PropNameExtension) ?? "";
+
+                return new DezikoNode
+                {
+                    ObjectId      = oid,
+                    ObjectName    = objectName,
+                    NamingPath    = namingPath,
+                    NameExtension = nameExt,
+                    Description   = description,
+                    ProfileName   = profileName,
+                    Units         = units,
+                    IsView        = false,
+                    LogObjectId   = logId,
+                };
+            }
+            catch
+            {
+                return null;
+            }
         }
 
         // ── Property read helpers ─────────────────────────────────────────────
@@ -337,33 +348,43 @@ namespace Connector
             BacnetObjectId targetObj, BacnetPropertyIds propId)
         {
             var result = new List<BacnetObjectId>();
-            try
-            {
-                // Attempt bulk read first
-                if (client.ReadPropertyRequest(address, targetObj, propId,
-                        out IList<BacnetValue> vals))
-                {
-                    foreach (var v in vals)
-                        if (v.Value is BacnetObjectId oid)
-                            result.Add(oid);
-                    return result;
-                }
-            }
-            catch (Exception ex)
-            {
-                 Console.WriteLine($"  [Hierarchy] Bulk {propId} read failed for {targetObj}: {ex.Message} – using index fallback…");
-            }
 
+            // 1. Read count first
+            uint count = 0;
             try
             {
-                // Fallback: read count (index 0) then each entry
                 if (!client.ReadPropertyRequest(address, targetObj,
                         propId, out IList<BacnetValue> countVal, arrayIndex: 0)
                     || countVal.Count == 0)
+                {
                     return result;
+                }
+                count = Convert.ToUInt32(countVal[0].Value);
+            }
+            catch { return result; }
 
-                uint count = Convert.ToUInt32(countVal[0].Value);
-                for (uint i = 1; i <= count; i++)
+            // 2. Small lists: try bulk read
+            if (count < 50)
+            {
+                try
+                {
+                    if (client.ReadPropertyRequest(address, targetObj, propId, out IList<BacnetValue> vals))
+                    {
+                        foreach (var v in vals)
+                            if (v.Value is BacnetObjectId oid)
+                                result.Add(oid);
+                        
+                        if (result.Count >= count) return result;
+                        result.Clear();
+                    }
+                }
+                catch { /* fallback */ }
+            }
+
+            // 3. Large lists: reliable index read
+            for (uint i = 1; i <= count; i++)
+            {
+                try
                 {
                     if (client.ReadPropertyRequest(address, targetObj,
                             propId, out IList<BacnetValue> entry, arrayIndex: i)
@@ -373,11 +394,9 @@ namespace Connector
                         result.Add(eid);
                     }
                 }
+                catch { /* skip missing index */ }
             }
-            catch (Exception ex)
-            {
-                Console.Error.WriteLine($"  [Hierarchy] WARN: Could not read {propId} of {targetObj}: {ex.Message}");
-            }
+
             return result;
         }
 
@@ -393,51 +412,57 @@ namespace Connector
         {
             var result = new List<BacnetObjectId>();
 
+            // 1. Read count first
+            uint count = 0;
             try
             {
-                // Attempt bulk read first
-                if (client.ReadPropertyRequest(address, viewId,
-                        propId, out IList<BacnetValue> vals))
-                {
-                    foreach (var v in vals)
-                        ExtractObjectId(v, result);
-                    
-                    if (result.Count > 0) return result;
-                }
-            }
-            catch (Exception ex)
-            {
-                 Console.WriteLine($"  [Hierarchy] Bulk SubordinateList read failed for {viewId}: {ex.Message} – using index fallback…");
-            }
-
-            try
-            {
-                // Fallback: read count (index 0) then each entry
                 if (!client.ReadPropertyRequest(address, viewId,
                         propId, out IList<BacnetValue> countVal, arrayIndex: 0)
                     || countVal.Count == 0)
                 {
-                    // If we are checking the standard property and it failed,
-                    // and this is a view, try the Deziko property
+                    // If we are checking the standard property and it failed, try the Deziko property
                     if (propId == PropSubordinateList)
-                    {
                         return ReadSubordinateList(client, address, viewId, PropDezikoSubordinateList);
-                    }
+
                     return result;
                 }
+                count = Convert.ToUInt32(countVal[0].Value);
+            }
+            catch
+            {
+                if (propId == PropSubordinateList)
+                    return ReadSubordinateList(client, address, viewId, PropDezikoSubordinateList);
+                return result;
+            }
 
-                uint count = Convert.ToUInt32(countVal[0].Value);
-                for (uint i = 1; i <= count; i++)
+            // 2. Small lists: try bulk
+            if (count < 50)
+            {
+                try
+                {
+                    if (client.ReadPropertyRequest(address, viewId, propId, out IList<BacnetValue> vals))
+                    {
+                        foreach (var v in vals) ExtractObjectId(v, result);
+                        if (result.Count >= count) return result;
+                        result.Clear();
+                    }
+                }
+                catch { /* fallback */ }
+            }
+
+            // 3. Reliable index-based read
+            for (uint i = 1; i <= count; i++)
+            {
+                try
                 {
                     if (client.ReadPropertyRequest(address, viewId,
-                            PropSubordinateList, out IList<BacnetValue> entry, arrayIndex: i)
+                            propId, out IList<BacnetValue> entry, arrayIndex: i)
                         && entry.Count > 0)
+                    {
                         ExtractObjectId(entry[0], result);
+                    }
                 }
-            }
-            catch (Exception ex)
-            {
-                Console.Error.WriteLine($"  [Hierarchy] WARN: Could not read SubordinateList of {viewId}: {ex.Message}");
+                catch { /* skip missing index */ }
             }
 
             return result;

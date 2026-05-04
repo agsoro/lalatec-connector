@@ -107,6 +107,7 @@ namespace Connector
                 // Set description explicitly to the technical key
                 await api.SetEntityViewAttributesAsync(evId, new Dictionary<string, string>
                 {
+                    ["description"] = obj.ObjectName,
                     ["bacnet_key"] = obj.ObjectName
                 });
 
@@ -114,7 +115,7 @@ namespace Connector
                 await api.EnsureRelationAsync(parentAssetId, "ASSET", evId, "ENTITY_VIEW");
                 counters.Relations++;
 
-                leafMap[obj.KeyPrefix] = evId;
+                leafMap[obj.KeyPrefix] = parentAssetId;
                 visitedObjects.Add(obj.ObjectId);
 
                 Console.WriteLine($"  [Hierarchy]   Orphan Sensor: '{leafName}' (key={obj.KeyPrefix})");

@@ -18,7 +18,7 @@ using System.Linq;
 
 namespace Connector
 {
-    using Telemetry = Dictionary<string, double>;
+    using Telemetry = Dictionary<string, object>;
 
     class GlueckReader : IDeviceReader, IDeviceWriter
     {
