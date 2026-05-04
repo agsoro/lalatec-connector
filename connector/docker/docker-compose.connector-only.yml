@@ -66,6 +66,12 @@ services:
     volumes:
       # Path is relative to this compose file (docker/connector.compose.json)
       - ./connector.compose.json:/app/connector.json:ro
+    # Monitoring dashboard port exposure.
+    # To access the dashboard at http://localhost:8081:
+    #   1. Set "monitoring": { "enabled": true, "port": 5000 } in connector.json
+    #   2. Uncomment the ports line below
+    # ports:
+    #   - "8081:5000"  # Monitoring dashboard (disabled by default)
     # Both services share the default compose network so "thingsboard"
     # resolves to the TB container IP automatically.
 

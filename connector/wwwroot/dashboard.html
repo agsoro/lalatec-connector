@@ -1,0 +1,452 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Monitoring Dashboard</title>
+<style>
+/* ── Reset & Base ───────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+    --bg-primary:     #0d1117;
+    --bg-secondary:   #161b22;
+    --bg-card:        #1c2128;
+    --border:         #30363d;
+    --text-primary:   #c9d1d9;
+    --text-secondary: #8b949e;
+    --text-muted:     #6e7681;
+    --accent:         #58a6ff;
+    --green:          #28a745;
+    --yellow:         #d29922;
+    --red:            #dc3545;
+    --orange:         #f0883e;
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    line-height: 1.6;
+    min-height: 100vh;
+}
+
+/* ── Header ──────────────────────────────────────────────────── */
+.header {
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border);
+    padding: 16px 24px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+.header h1 { font-size: 1.4rem; font-weight: 600; color: var(--accent); }
+.header .meta { font-size: 0.85rem; color: var(--text-muted); }
+
+/* ── Container ───────────────────────────────────────────────── */
+.container { max-width: 1400px; margin: 0 auto; padding: 20px 24px; }
+
+/* ── Section ─────────────────────────────────────────────────── */
+.section { margin-bottom: 28px; }
+.section-title {
+    font-size: 1.05rem;
+    font-weight: 600;
+    margin-bottom: 12px;
+    color: var(--text-primary);
+    padding-bottom: 6px;
+    border-bottom: 1px solid var(--border);
+}
+
+/* ── Overview Cards ──────────────────────────────────────────── */
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
+.card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 16px;
+    text-align: center;
+}
+.card .value {
+    font-size: 2rem;
+    font-weight: 700;
+    line-height: 1.2;
+}
+.card .label { font-size: 0.8rem; color: var(--text-secondary); margin-top: 4px; }
+.card.green .value { color: var(--green); }
+.card.red .value    { color: var(--red); }
+.card.blue .value   { color: var(--accent); }
+.card.yellow .value { color: var(--yellow); }
+
+/* ── Device Table ────────────────────────────────────────────── */
+.table-wrapper { overflow-x: auto; border: 1px solid var(--border); border-radius: 6px; }
+table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+thead { background: var(--bg-secondary); }
+th {
+    text-align: left; padding: 10px 14px;
+    font-weight: 600; color: var(--text-secondary);
+    border-bottom: 1px solid var(--border);
+    font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.5px;
+}
+td {
+    padding: 8px 14px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-primary);
+}
+tr:last-child td { border-bottom: none; }
+tr:hover { background: rgba(255,255,255,0.02); }
+
+/* Status badge */
+.badge {
+    display: inline-block; padding: 2px 10px;
+    border-radius: 12px; font-size: 0.75rem; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.3px;
+}
+.badge.online  { background: rgba(40,167,69,0.15); color: var(--green); }
+.badge.offline { background: rgba(220,53,69,0.15); color: var(--red); }
+
+/* ── Alarm List ──────────────────────────────────────────────── */
+.alarm-list { list-style: none; }
+.alarm-item {
+    padding: 10px 14px;
+    border-left: 3px solid var(--border);
+    margin-bottom: 6px;
+    background: var(--bg-card);
+    border-radius: 0 4px 4px 0;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 0.9rem;
+}
+.alarm-item.CRITICAL { border-left-color: var(--red); }
+.alarm-item.WARNING  { border-left-color: var(--yellow); }
+.alarm-item.NONE     { border-left-color: var(--text-muted); }
+.alarm-item.DEFAULT  { border-left-color: var(--accent); }
+
+.alarm-severity { font-weight: 600; text-transform: uppercase; font-size: 0.75rem; }
+.alarm-severity.CRITICAL { color: var(--red); }
+.alarm-severity.WARNING  { color: var(--yellow); }
+
+.alarm-message { flex: 1; margin: 0 12px; }
+.alarm-time    { color: var(--text-muted); font-size: 0.8rem; }
+
+.no-alarm {
+    text-align: center; padding: 20px;
+    color: var(--green); font-style: italic;
+}
+
+/* ── Log Viewer ──────────────────────────────────────────────── */
+.log-controls {
+    display: flex; align-items: center; gap: 12px;
+    margin-bottom: 10px; flex-wrap: wrap;
+}
+.log-controls label { font-size: 0.85rem; color: var(--text-secondary); }
+.log-controls select, .log-controls input {
+    background: var(--bg-secondary); border: 1px solid var(--border);
+    color: var(--text-primary); padding: 4px 8px; border-radius: 4px; font-size: 0.85rem;
+}
+.log-controls select:focus, .log-controls input:focus { outline: none; border-color: var(--accent); }
+
+.btn {
+    background: var(--bg-secondary); border: 1px solid var(--border);
+    color: var(--text-primary); padding: 4px 14px; border-radius: 4px;
+    cursor: pointer; font-size: 0.85rem;
+}
+.btn:hover { background: var(--border); }
+.btn.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+.log-viewer {
+    max-height: 420px; overflow-y: auto;
+    border: 1px solid var(--border); border-radius: 6px;
+    background: var(--bg-secondary);
+    font-family: "SF Mono", "Fira Code", "Consolas", monospace;
+    font-size: 0.8rem; line-height: 1.7;
+}
+.log-entry { padding: 2px 12px; display: flex; gap: 10px; }
+.log-entry:hover { background: rgba(255,255,255,0.03); }
+.log-ts   { color: var(--text-muted); white-space: nowrap; min-width: 120px; }
+.log-sev  { font-weight: 600; text-transform: uppercase; font-size: 0.7rem; padding: 0 6px; border-radius: 2px; white-space: nowrap; }
+.log-sev.info     { color: var(--accent); }
+.log-sev.warning  { color: var(--yellow); background: rgba(210,153,34,0.1); }
+.log-sev.error    { color: var(--red); background: rgba(220,53,69,0.1); }
+.log-msg { color: var(--text-primary); flex: 1; }
+.log-src  { color: var(--text-muted); font-size: 0.75rem; }
+
+/* ── Footer ──────────────────────────────────────────────────── */
+.footer {
+    text-align: center; padding: 16px; color: var(--text-muted);
+    font-size: 0.75rem; border-top: 1px solid var(--border); margin-top: 20px;
+}
+
+/* ── Responsive ──────────────────────────────────────────────── */
+@media (max-width: 768px) {
+    .container { padding: 12px; }
+    .header { flex-direction: column; gap: 6px; align-items: flex-start; }
+    .cards { grid-template-columns: repeat(2, 1fr); }
+}
+</style>
+</head>
+<body>
+
+<!-- ── Header ────────────────────────────────────────────────── -->
+<div class="header">
+    <h1>&#x1F4E6; Monitoring Dashboard</h1>
+    <div class="meta">Read-Only &middot; Auto-refresh: <span id="refreshStatus">Enabled</span></div>
+</div>
+
+<div class="container">
+
+    <!-- ── Overview Cards ──────────────────────────────────── -->
+    <div class="section">
+        <div class="section-title">System Overview</div>
+        <div class="cards">
+            <div class="card blue">
+                <div class="value" id="totalDevices">-</div>
+                <div class="label">Total Devices</div>
+            </div>
+            <div class="card green">
+                <div class="value" id="onlineDevices">-</div>
+                <div class="label">Online</div>
+            </div>
+            <div class="card red">
+                <div class="value" id="offlineDevices">-</div>
+                <div class="label">Offline</div>
+            </div>
+            <div class="card yellow">
+                <div class="value" id="alarmCount">-</div>
+                <div class="label">Active Alarms</div>
+            </div>
+            <div class="card">
+                <div class="value" id="uptime">-</div>
+                <div class="label">Uptime</div>
+            </div>
+            <div class="card">
+                <div class="value" id="logCount">-</div>
+                <div class="label">Log Buffer</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ── Device Table ────────────────────────────────────── -->
+    <div class="section">
+        <div class="section-title">Device Status</div>
+        <div class="table-wrapper">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Device</th>
+                        <th>Type</th>
+                        <th>Status</th>
+                        <th>Connection</th>
+                        <th>Last Seen</th>
+                    </tr>
+                </thead>
+                <tbody id="deviceTable"></tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- ── Active Alarms ───────────────────────────────────── -->
+    <div class="section">
+        <div class="section-title">Active Alarms</div>
+        <ul class="alarm-list" id="alarmList">
+            <li class="no-alarm">Loading...</li>
+        </ul>
+    </div>
+
+    <!-- ── Log Viewer ──────────────────────────────────────── -->
+    <div class="section">
+        <div class="section-title">Operational Logs</div>
+        <div class="log-controls">
+            <label for="logSeverity">Filter:</label>
+            <select id="logSeverity">
+                <option value="all">All Levels</option>
+                <option value="error">Error</option>
+                <option value="warning">Warning</option>
+                <option value="info">Info</option>
+            </select>
+            <label for="logCount">Lines:</label>
+            <select id="logCount">
+                <option value="100">100</option>
+                <option value="200" selected>200</option>
+                <option value="500">500</option>
+                <option value="1000">1000</option>
+            </select>
+            <button class="btn" id="refreshBtn" onclick="fetchData()">Refresh</button>
+            <button class="btn active" id="autoRefreshBtn" onclick="toggleAutoRefresh()">Auto-Refresh: ON</button>
+        </div>
+        <div class="log-viewer" id="logViewer">
+            <div class="log-entry"><span class="log-ts">--:--:--.---</span> <span class="log-sev info">...</span> <span class="log-msg">Waiting for data...</span></div>
+        </div>
+    </div>
+
+</div>
+
+<!-- ── Footer ──────────────────────────────────────────────── -->
+<div class="footer">
+    Connector Dashboard v<span id="version">-</span> &middot; Last updated: <span id="lastUpdate">-</span>
+</div>
+
+<!-- ── JavaScript ───────────────────────────────────────────── -->
+<script>
+(function() {
+    let autoRefresh = true;
+    let refreshInterval = null;
+    const REFRESH_MS = 5000;  // 5 seconds
+
+    // ── Fetch all data ──────────────────────────────────────
+    async function fetchData() {
+        try {
+            // Status overview
+            const [statusResp, deviceResp, logResp, alarmResp] = await Promise.allSettled([
+                fetch('/api/status'),
+                fetch('/api/devices'),
+                fetch('/api/logs?count=' + document.getElementById('logCount').value),
+                fetch('/api/alarm')
+            ]);
+
+            if (statusResp.status === 'fulfilled') {
+                const s = await statusResp.value.json();
+                updateStatusCards(s);
+            }
+            if (deviceResp.status === 'fulfilled') {
+                const devices = await deviceResp.value.json();
+                updateDeviceTable(devices);
+            }
+            if (alarmResp.status === 'fulfilled') {
+                const alarms = await alarmResp.value.json();
+                updateAlarmList(alarms);
+            }
+            if (logResp.status === 'fulfilled') {
+                const logs = await logResp.value.json();
+                updateLogViewer(logs);
+            }
+
+            document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString();
+        } catch (err) {
+            console.error('Fetch error:', err);
+        }
+    }
+
+    // ── Update overview cards ───────────────────────────────
+    function updateStatusCards(s) {
+        document.getElementById('totalDevices').textContent   = s.totalDevices;
+        document.getElementById('onlineDevices').textContent  = s.onlineDevices;
+        document.getElementById('offlineDevices').textContent = s.offlineDevices;
+        document.getElementById('alarmCount').textContent     = s.activeAlarms >= 0 ? s.activeAlarms : '?';
+        document.getElementById('uptime').textContent         = formatUptime(s.uptimeSeconds);
+        document.getElementById('logCount').textContent       = s.logBufferSize + '/' + s.logBufferCapacity;
+        document.getElementById('version').textContent        = s.connectorVersion;
+    }
+
+    function formatUptime(seconds) {
+        var d = Math.floor(seconds / 86400);
+        var h = Math.floor((seconds % 86400) / 3600);
+        var m = Math.floor((seconds % 3600) / 60);
+        var s = seconds % 60;
+        if (d > 0) return d + 'd ' + h + 'h';
+        if (h > 0) return h + 'h ' + m + 'm';
+        if (m > 0) return m + 'm ' + s + 's';
+        return s + 's';
+    }
+
+    // ── Update device table ─────────────────────────────────
+    function updateDeviceTable(devices) {
+        var tbody = document.getElementById('deviceTable');
+        if (!devices || devices.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--text-muted)">No devices configured</td></tr>';
+            return;
+        }
+        tbody.innerHTML = devices.map(function(d) {
+            return '<tr>' +
+                '<td>' + escHtml(d.name) + '</td>' +
+                '<td>' + escHtml(d.type) + '</td>' +
+                '<td><span class="badge ' + d.status + '">' + escHtml(d.status) + '</span></td>' +
+                '<td>' + escHtml(d.connection) + ':' + d.port + '</td>' +
+                '<td>' + escHtml(d.lastSeen) + '</td>' +
+            '</tr>';
+        }).join('');
+    }
+
+    // ── Update alarm list ───────────────────────────────────
+    function updateAlarmList(alarms) {
+        var list = document.getElementById('alarmList');
+        if (!alarms || alarms.length === 0) {
+            list.innerHTML = '<li class="no-alarm">&#x2714; No active alarms</li>';
+            return;
+        }
+        list.innerHTML = alarms.map(function(a) {
+            var sev = a.severity || 'DEFAULT';
+            return '<li class="alarm-item ' + sev + '">' +
+                '<span class="alarm-severity ' + sev + '">' + escHtml(sev) + '</span>' +
+                '<span class="alarm-message">' + escHtml(a.message || a.type || '-') + '</span>' +
+                '<span class="alarm-time">' + escHtml(a.time || '') + '</span>' +
+            '</li>';
+        }).join('');
+    }
+
+    // ── Update log viewer ───────────────────────────────────
+    function updateLogViewer(logs) {
+        var viewer = document.getElementById('logViewer');
+        var filter = document.getElementById('logSeverity').value;
+
+        var filtered = logs.filter(function(l) {
+            return filter === 'all' || l.severity === filter;
+        });
+
+        viewer.innerHTML = filtered.map(function(l) {
+            return '<div class="log-entry">' +
+                '<span class="log-ts">' + escHtml(l.timestamp) + '</span>' +
+                '<span class="log-sev ' + l.severity + '">' + escHtml(l.severity) + '</span>' +
+                '<span class="log-msg">' + escHtml(l.message) + '</span>' +
+                (l.source ? '<span class="log-src">[' + escHtml(l.source) + ']</span>' : '') +
+            '</div>';
+        }).join('');
+
+        // Auto-scroll to bottom
+        viewer.scrollTop = viewer.scrollHeight;
+    }
+
+    // ── HTML escaping ───────────────────────────────────────
+    function escHtml(str) {
+        if (!str) return '';
+        return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
+
+    // ── Toggle auto-refresh ─────────────────────────────────
+    window.toggleAutoRefresh = function() {
+        autoRefresh = !autoRefresh;
+        var btn = document.getElementById('autoRefreshBtn');
+        btn.textContent = 'Auto-Refresh: ' + (autoRefresh ? 'ON' : 'OFF');
+        btn.classList.toggle('active', autoRefresh);
+        document.getElementById('refreshStatus').textContent = autoRefresh ? 'Enabled' : 'Disabled';
+
+        if (autoRefresh) startAutoRefresh();
+        else stopAutoRefresh();
+    };
+
+    function startAutoRefresh() {
+        stopAutoRefresh();
+        fetchData();
+        refreshInterval = setInterval(fetchData, REFRESH_MS);
+    }
+    function stopAutoRefresh() {
+        if (refreshInterval) { clearInterval(refreshInterval); refreshInterval = null; }
+    }
+
+    // ── Filter change ───────────────────────────────────────
+    document.getElementById('logSeverity').addEventListener('change', function() {
+        fetchData();
+    });
+
+    // ── Log count change ────────────────────────────────────
+    document.getElementById('logCount').addEventListener('change', function() {
+        fetchData();
+    });
+
+    // ── Start ───────────────────────────────────────────────
+    startAutoRefresh();
+})();
+</script>
+
+</body>
+</html>

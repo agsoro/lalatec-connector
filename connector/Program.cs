@@ -25,6 +25,9 @@ namespace Connector
 
     class Program
     {
+        /// <summary>Shared log buffer for the monitoring dashboard.</summary>
+        static LogBuffer? _logBuffer;
+
         static async Task Main()
         {
             var version = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version;
@@ -50,6 +53,9 @@ namespace Connector
                 if (!connections.ContainsKey(d.ConnectionId))
                     throw new Exception(
                         $"Device '{d.Name}' references unknown connectionId '{d.ConnectionId}'.");
+
+            // ── Initialize logging / log buffer ─────────────────────────────
+            _logBuffer = new LogBuffer(cfg.Monitoring?.LogBufferSize ?? 5000);
 
             // ── Print summary ─────────────────────────────────────────────────
             Console.WriteLine($"Connections ({cfg.Connections.Count}):");
@@ -207,9 +213,9 @@ namespace Connector
             }
 
             // ── Per-device poll-interval tracking ─────────────────────────────
-            var lastPolledAt = new Dictionary<DeviceConfig, DateTime>();
+            var lastPolledAt = new Dictionary<string, DateTime>();
             foreach (var d in cfg.Devices)
-                lastPolledAt[d] = DateTime.MinValue;
+                lastPolledAt[d.Name] = DateTime.MinValue;
 
             int globalIntervalMs = cfg.Polling.IntervalSeconds * 1000;
 
@@ -235,7 +241,37 @@ namespace Connector
 
                 // COV devices don't need the polling loop to read their values;
                 // set LastPolledAt so ServiceCovDevice runs every tick.
-                lastPolledAt[d] = DateTime.UtcNow;
+                lastPolledAt[d.Name] = DateTime.UtcNow;
+            }
+
+            // ── Start monitoring dashboard (if enabled) ───────────────────────
+            MonitoringServer? monitoringServer = null;
+            if (cfg.Monitoring?.Enabled == true)
+            {
+                monitoringServer = new MonitoringServer(
+                    _logBuffer!,
+                    cfg,
+                    tbApi,
+                    offlineDevices,
+                    lastPolledAt,
+                    cfg.Monitoring.Port);
+
+                var monServer = monitoringServer;
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        await monServer.RunAsync(cts.Token);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        // Expected on shutdown
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.Error.WriteLine($"  [Monitoring] ERROR: {ex.Message}");
+                    }
+                }, cts.Token);
             }
 
             // ── Polling loop (1 s tick) ───────────────────────────────────────
@@ -261,12 +297,17 @@ namespace Connector
             }
 
             Console.WriteLine("\nShutting down…");
+
+            // ── Graceful shutdown ─────────────────────────────────────────
             // Gracefully cancel COV subscriptions
             foreach (var d in cfg.Devices)
                 if (d.Bacnet?.Cov is { Enabled: true })
                     bacnetReader.DisposeCovClient(d.Name);
             foreach (var c in mqttClients.Values)
                 await c.StopAsync();
+
+            // Stop monitoring server
+            monitoringServer?.Dispose();
         }
 
         // =====================================================================
@@ -274,7 +315,7 @@ namespace Connector
         // =====================================================================
         static async Task PollAndPublishAsync(
             DeviceConfig device, ConnectionConfig conn, IManagedMqttClient mqtt,
-            Dictionary<DeviceConfig, DateTime> lastPolledAt,
+            Dictionary<string, DateTime> lastPolledAt,
             int deviceIntervalMs,
             ThingsBoardApi tbApi,
             Dictionary<string, string> deviceIds,
@@ -312,10 +353,10 @@ namespace Connector
 
                 // ── Polling mode (non-COV BACnet / Modbus) ────────────────────
                 var now = DateTime.UtcNow;
-                if (now - lastPolledAt[device] < TimeSpan.FromMilliseconds(deviceIntervalMs))
+                if (now - lastPolledAt[device.Name] < TimeSpan.FromMilliseconds(deviceIntervalMs))
                     return;   // not yet time for this device
 
-                lastPolledAt[device] = now;
+                lastPolledAt[device.Name] = now;
 
                 if (reader is BacnetReader br)
                 {
@@ -522,7 +563,7 @@ namespace Connector
                                 $"v1/devices/me/rpc/response/{requestId}",
                                 JsonSerializer.Serialize(new { error = ex.Message })));
                     }
-                    catch { /* swallow \u2013 best effort */ }
+                    catch { /* swallow – best effort */ }
                 }
             }
         }
