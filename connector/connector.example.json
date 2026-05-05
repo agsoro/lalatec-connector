@@ -14,6 +14,15 @@
     "intervalSeconds": 30
   },
 
+  // ── Monitoring Dashboard ──────────────────────────────────────────────────
+  // Embedded read-only dashboard (Kestrel HTTP server on port 5000).
+  // No authentication or security — for internal/controlled use only.
+  "monitoring": {
+    "enabled":     false,
+    "port":        5000,
+    "logBufferSize": 5000
+  },
+
   // ── Connections ────────────────────────────────────────────────────────────
   // Define one entry per physical network endpoint.
   // Devices reference connections by "id".

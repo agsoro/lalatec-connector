@@ -25,6 +25,10 @@ namespace Connector
 
     class Program
     {
+        /// <summary>Shared logger for the monitoring dashboard.</summary>
+        static ConsoleLogger? _logger;
+        static LogBuffer? _logBuffer => _logger?.Buffer;
+
         static async Task Main()
         {
             var version = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version;
@@ -51,16 +55,19 @@ namespace Connector
                     throw new Exception(
                         $"Device '{d.Name}' references unknown connectionId '{d.ConnectionId}'.");
 
+            // ── Initialize logging ────────────────────────────────────────────
+            _logger = new ConsoleLogger(new LogBuffer(cfg.Monitoring?.LogBufferSize ?? 5000));
+
             // ── Print summary ─────────────────────────────────────────────────
-            Console.WriteLine($"Connections ({cfg.Connections.Count}):");
+            _logger.Info($"Connections ({cfg.Connections.Count}):");
             foreach (var c in cfg.Connections)
                 Console.WriteLine($"  [{c.Id,-22}] {c.Type,-12} {c.Host}:{c.Port}");
 
-            Console.WriteLine($"\nDevices ({cfg.Devices.Count}):");
+            _logger.Info($"Devices ({cfg.Devices.Count}):");
             foreach (var d in cfg.Devices)
             {
                 var conn = connections[d.ConnectionId];
-                Console.WriteLine($"  [{d.DeviceType,-15}] {d.Name,-38} → {conn.Host}:{conn.Port}");
+                _logger.Info($"  [{d.DeviceType,-15}] {d.Name,-38} → {conn.Host}:{conn.Port}");
             }
 
             // ── Ctrl+C ────────────────────────────────────────────────────────
@@ -68,7 +75,7 @@ namespace Connector
             Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };
 
             // ── ThingsBoard provisioning ──────────────────────────────────────
-            Console.WriteLine("\n► Provisioning devices in ThingsBoard…");
+            _logger.Info("Provisioning devices in ThingsBoard…");
             var tbApi = new ThingsBoardApi(cfg.ThingsBoard);
             await tbApi.LoginAsync();
 
@@ -80,7 +87,7 @@ namespace Connector
             }
 
             // ── MQTT clients (one per device) ─────────────────────────────────
-            Console.WriteLine("\n► Connecting MQTT clients…");
+            _logger.Info("Connecting MQTT clients…");
             var mqttClients = new Dictionary<DeviceConfig, IManagedMqttClient>();
             foreach (var d in cfg.Devices)
             {
@@ -93,8 +100,7 @@ namespace Connector
                     var writer = DeviceReaderFactory.GetWriter(d.DeviceType);
                     if (writer is null)
                     {
-                        Console.WriteLine(
-                            $"  [WB] WARNING: '{d.Name}' has writeback enabled but " +
+                        _logger!.Warning($"'{d.Name}' has writeback enabled but " +
                             $"driver '{d.DeviceType}' does not implement IDeviceWriter.");
                     }
                     else
@@ -104,13 +110,13 @@ namespace Connector
                         if (wb.SharedAttributes)
                         {
                             await mqttClient.SubscribeAsync("v1/devices/me/attributes");
-                            Console.WriteLine($"  [WB] {d.Name} → subscribed to shared-attribute updates.");
+                            _logger!.Info($"  [WB] {d.Name} → subscribed to shared-attribute updates.");
                         }
 
                         if (wb.Rpc)
                         {
                             await mqttClient.SubscribeAsync("v1/devices/me/rpc/request/+");
-                            Console.WriteLine($"  [WB] {d.Name} → subscribed to server-side RPC.");
+                            _logger!.Info($"  [WB] {d.Name} → subscribed to server-side RPC.");
                         }
 
                         // Capture loop variables for the closure
@@ -144,7 +150,7 @@ namespace Connector
                 var capturedConn   = connections[d.ConnectionId];
                 _ = Task.Run(async () =>
                 {
-                    Console.WriteLine(
+                    _logger!.Info(
                         $"  [Hierarchy] Background job started for '{capturedDevice.Name}'.");
                     try
                     {
@@ -167,13 +173,13 @@ namespace Connector
                         string? tbDeviceId = await tbApi.FindDeviceIdAsync(capturedDevice.Name);
                         if (tbDeviceId is null)
                         {
-                            Console.Error.WriteLine(
+                            _logger!.Error(
                                 $"  [Hierarchy] ERROR: TB device '{capturedDevice.Name}' not found in ThingsBoard. " +
                                 "Ensure the device was provisioned before the hierarchy job runs.");
                             return;
                         }
 
-                        Console.WriteLine(
+                        _logger!.Info(
                             $"  [Hierarchy] Provisioning asset tree for '{capturedDevice.Name}' " +
                             $"(device UUID={tbDeviceId}, roots={tree.Roots.Count})…");
                         var provisioner = new DezikoProvisioner();
@@ -191,25 +197,23 @@ namespace Connector
                         // Also push the mapping into the BacnetReader instance so it can route alarms to assets
                         bacnetReader.UpdateAssetIdMap(capturedDevice.Name, leafMap, tbApi, capturedDevice, tbDeviceId);
 
-                        Console.WriteLine(
+                        _logger!.Info(
                             $"  [Hierarchy] Leaf map: {leafMap.Count} data-point assets registered for telemetry and alarm routing.");
                     }
                     catch (OperationCanceledException) { /* shutting down */ }
                     catch (Exception ex)
                     {
-                        Console.Error.WriteLine(
-                            $"  [Hierarchy] ERROR '{capturedDevice.Name}': {ex.GetType().Name}: {ex.Message}");
+                        _logger!.Error($"  [Hierarchy] ERROR '{capturedDevice.Name}': {ex.GetType().Name}: {ex.Message}");
                         if (ex.InnerException is not null)
-                            Console.Error.WriteLine(
-                                $"  [Hierarchy]   Inner: {ex.InnerException.Message}");
+                            _logger!.Error($"  [Hierarchy]   Inner: {ex.InnerException.Message}");
                     }
                 }, cts.Token);
             }
 
             // ── Per-device poll-interval tracking ─────────────────────────────
-            var lastPolledAt = new Dictionary<DeviceConfig, DateTime>();
+            var lastPolledAt = new Dictionary<string, DateTime>();
             foreach (var d in cfg.Devices)
-                lastPolledAt[d] = DateTime.MinValue;
+                lastPolledAt[d.Name] = DateTime.MinValue;
 
             int globalIntervalMs = cfg.Polling.IntervalSeconds * 1000;
 
@@ -225,7 +229,7 @@ namespace Connector
                 var capturedConn   = connections[d.ConnectionId];
                 var capturedMqtt   = mqttClients[d];
 
-                Console.WriteLine($"  [COV] Initialising COV mode for '{d.Name}'…");
+                _logger!.Info($"  [COV] Initialising COV mode for '{d.Name}'…");
                 bacnetReader.InitCovMode(
                     capturedConn,
                     capturedDevice,
@@ -235,11 +239,42 @@ namespace Connector
 
                 // COV devices don't need the polling loop to read their values;
                 // set LastPolledAt so ServiceCovDevice runs every tick.
-                lastPolledAt[d] = DateTime.UtcNow;
+                lastPolledAt[d.Name] = DateTime.UtcNow;
+            }
+
+            // ── Start monitoring dashboard (if enabled) ───────────────────────
+            MonitoringServer? monitoringServer = null;
+            if (cfg.Monitoring?.Enabled == true)
+            {
+                _logger!.Info($"Starting monitoring dashboard on port {cfg.Monitoring.Port}...");
+                monitoringServer = new MonitoringServer(
+                    _logBuffer!,
+                    cfg,
+                    tbApi,
+                    offlineDevices,
+                    lastPolledAt,
+                    cfg.Monitoring.Port);
+
+                var monServer = monitoringServer;
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        await monServer.RunAsync(cts.Token);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        // Expected on shutdown
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger!.Error($"  [Monitoring] ERROR: {ex.Message}");
+                    }
+                }, cts.Token);
             }
 
             // ── Polling loop (1 s tick) ───────────────────────────────────────
-            Console.WriteLine($"\n► Running. Ctrl+C to stop.\n");
+            _logger.Info("Running. Ctrl+C to stop.");
 
             while (!cts.Token.IsCancellationRequested)
             {
@@ -260,13 +295,18 @@ namespace Connector
                 catch (TaskCanceledException) { break; }
             }
 
-            Console.WriteLine("\nShutting down…");
+            _logger.Info("Shutting down…");
+
+            // ── Graceful shutdown ─────────────────────────────────────────
             // Gracefully cancel COV subscriptions
             foreach (var d in cfg.Devices)
                 if (d.Bacnet?.Cov is { Enabled: true })
                     bacnetReader.DisposeCovClient(d.Name);
             foreach (var c in mqttClients.Values)
                 await c.StopAsync();
+
+            // Stop monitoring server
+            monitoringServer?.Dispose();
         }
 
         // =====================================================================
@@ -274,7 +314,7 @@ namespace Connector
         // =====================================================================
         static async Task PollAndPublishAsync(
             DeviceConfig device, ConnectionConfig conn, IManagedMqttClient mqtt,
-            Dictionary<DeviceConfig, DateTime> lastPolledAt,
+            Dictionary<string, DateTime> lastPolledAt,
             int deviceIntervalMs,
             ThingsBoardApi tbApi,
             Dictionary<string, string> deviceIds,
@@ -304,7 +344,7 @@ namespace Connector
                         await PublishTelemetryAsync(mqtt, telemetry);
 
                     if (attributes.Count > 0 || telemetry.Count > 0)
-                        Console.WriteLine(
+                        _logger!.Info(
                             $"[{DateTime.Now:HH:mm:ss}] [{reader.DriverName,-10}] {device.Name,-38} " +
                             $"[COV] attrs={attributes.Count} fallback-tel={telemetry.Count}");
                     return;
@@ -312,10 +352,10 @@ namespace Connector
 
                 // ── Polling mode (non-COV BACnet / Modbus) ────────────────────
                 var now = DateTime.UtcNow;
-                if (now - lastPolledAt[device] < TimeSpan.FromMilliseconds(deviceIntervalMs))
+                if (now - lastPolledAt[device.Name] < TimeSpan.FromMilliseconds(deviceIntervalMs))
                     return;   // not yet time for this device
 
-                lastPolledAt[device] = now;
+                lastPolledAt[device.Name] = now;
 
                 if (reader is BacnetReader br)
                 {
@@ -361,12 +401,12 @@ namespace Connector
                     await PublishAttributesAsync(mqtt, attributes);
 
                 string tvLine = string.Join("  ", telemetry.Select(kv => $"{kv.Key}={kv.Value}"));
-                Console.WriteLine(
+                _logger!.Info(
                     $"[{DateTime.Now:HH:mm:ss}] [{reader.DriverName,-10}] {device.Name,-38} " +
                     $"{(telemetry.Count == 0 ? "(no values)" : tvLine)}");
 
                 if (attributes.Count > 0)
-                    Console.WriteLine(
+                    _logger!.Info(
                         $"{"",13}  {"[attrs]",-10}  " +
                         $"{string.Join(", ", attributes.Keys.Take(5))}" +
                         $"{(attributes.Count > 5 ? $" … +{attributes.Count - 5} more" : "")}");
@@ -379,8 +419,7 @@ namespace Connector
             }
             catch (Exception ex)
             {
-                Console.Error.WriteLine(
-                    $"[{DateTime.Now:HH:mm:ss}] ERROR [{device.DeviceType}] {device.Name}: {ex.Message}");
+                _logger!.Error($"[{DateTime.Now:HH:mm:ss}] ERROR [{device.DeviceType}] {device.Name}: {ex.Message}");
 
                 // ── Communication Loss Alarm ──────────────────────────────────
                 if (offlineDevices.Add(device.Name))
@@ -459,8 +498,7 @@ namespace Connector
                         if (prop.Value.ValueKind != JsonValueKind.Number) continue;
 
                         double val = prop.Value.GetDouble();
-                        Console.WriteLine(
-                            $"  [WB←TB] {device.Name}  attr  {prop.Name} = {val}");
+                        _logger!.Info($"  [WB←TB] {device.Name}  attr  {prop.Name} = {val}");
                         writer.Write(conn, device, prop.Name, val);
                     }
                     return;
@@ -486,8 +524,7 @@ namespace Connector
                             ?? throw new ArgumentException("RPC params.key is null.");
                         double val = rpcParams.GetProperty("value").GetDouble();
 
-                        Console.WriteLine(
-                            $"  [WB\u2190TB] {device.Name}  rpc   {key} = {val}  (reqId={requestId})");
+                        _logger!.Info($"  [WB←TB] {device.Name}  rpc   {key} = {val}  (reqId={requestId})");
                         writer.Write(conn, device, key, val);
 
                         await mqttClient.EnqueueAsync(
@@ -496,8 +533,7 @@ namespace Connector
                     }
                     else
                     {
-                        Console.WriteLine(
-                            $"  [WB\u2190TB] {device.Name}  rpc   unknown method '{method}' \u2013 ignored.");
+                        _logger!.Info($"  [WB←TB] {device.Name}  rpc   unknown method '{method}' – ignored.");
                         await mqttClient.EnqueueAsync(
                             BuildMqttMessage(respTopic,
                                 JsonSerializer.Serialize(new { error = $"Unknown method '{method}'" })));
@@ -508,8 +544,7 @@ namespace Connector
             }
             catch (Exception ex)
             {
-                Console.Error.WriteLine(
-                    $"  [WB\u2190TB] ERROR {device.Name}: {ex.GetType().Name}: {ex.Message}");
+                _logger!.Error($"  [WB←TB] ERROR {device.Name}: {ex.GetType().Name}: {ex.Message}");
 
                 // Send error response for RPC so the caller doesn't time out
                 if (topic.StartsWith("v1/devices/me/rpc/request/"))
@@ -522,7 +557,7 @@ namespace Connector
                                 $"v1/devices/me/rpc/response/{requestId}",
                                 JsonSerializer.Serialize(new { error = ex.Message })));
                     }
-                    catch { /* swallow \u2013 best effort */ }
+                    catch { /* swallow – best effort */ }
                 }
             }
         }
@@ -540,11 +575,11 @@ namespace Connector
                     .WithClientId($"conn-{d.AccessToken[^10..]}-{Guid.NewGuid().ToString("N")[..4]}")
                     .WithCleanSession()
                     .Build())
-                .Build();
+            .Build();
 
             var client = new MqttFactory().CreateManagedMqttClient();
-            client.ConnectedAsync    += _ => { Console.WriteLine($"    [MQTT ✓] {d.Name}"); return Task.CompletedTask; };
-            client.DisconnectedAsync += a => { Console.WriteLine($"    [MQTT ✗] {d.Name}: {a.ReasonString} – reconnecting…"); return Task.CompletedTask; };
+            client.ConnectedAsync    += _ => { _logger!.Info($"    [MQTT ✓] {d.Name}"); return Task.CompletedTask; };
+            client.DisconnectedAsync += a => { _logger!.Warning($"    [MQTT ✗] {d.Name}: {a.ReasonString} – reconnecting…"); return Task.CompletedTask; };
 
             await client.StartAsync(options);
 

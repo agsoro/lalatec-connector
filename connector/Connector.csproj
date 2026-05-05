@@ -18,12 +18,23 @@
     <PackageReference Include="MQTTnet.Extensions.ManagedClient" Version="4.3.3.952" />
     <!-- BACnet/IP (ela-compil stack, the one behind YABE) -->
     <PackageReference Include="BACnet"                           Version="3.0.2" />
+    <!-- Monitoring Dashboard (Kestrel + ASP.NET Core) -->
+    <PackageReference Include="Microsoft.AspNetCore.OpenApi"      Version="8.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Hosting"      Version="8.0.0" />
   </ItemGroup>
 
   <ItemGroup>
     <Content Include="connector.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
+    <!-- Embed dashboard HTML and also copy to wwwroot for dev -->
+    <EmbeddedResource Include="wwwroot\dashboard.html">
+      <LogicalName>Connector.wwwroot.dashboard.html</LogicalName>
+    </EmbeddedResource>
+    <None Include="wwwroot\dashboard.html">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>wwwroot\dashboard.html</Link>
+    </None>
   </ItemGroup>
 
 </Project>

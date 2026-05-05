@@ -1,14 +1,15 @@
-﻿// Config.cs – JSON model, mirrors connector.json
+// Config.cs – JSON model, mirrors connector.json
 using System.Collections.Generic;
 using System.Text.Json.Serialization;
 
 namespace Connector
 {
     record AppConfig(
-        [property: JsonPropertyName("thingsboard")] TbConfig               ThingsBoard,
-        [property: JsonPropertyName("polling")]     PollingConfig          Polling,
-        [property: JsonPropertyName("connections")] List<ConnectionConfig> Connections,
-        [property: JsonPropertyName("devices")]     List<DeviceConfig>     Devices
+        [property: JsonPropertyName("thingsboard")]   TbConfig?              ThingsBoard,
+        [property: JsonPropertyName("polling")]       PollingConfig?         Polling,
+        [property: JsonPropertyName("connections")]   List<ConnectionConfig> Connections,
+        [property: JsonPropertyName("devices")]       List<DeviceConfig>     Devices,
+        [property: JsonPropertyName("monitoring")]    MonitoringConfig?      Monitoring
     );
 
     // ── Write-back ─────────────────────────────────────────────────────────────
@@ -242,5 +243,17 @@ namespace Connector
 
         /// <summary>Re-discover after this many minutes (0 = never refresh).</summary>
         [property: JsonPropertyName("refreshIntervalMinutes")] int  RefreshIntervalMinutes
+    );
+
+    // ── Monitoring Dashboard ──────────────────────────────────────────────────
+
+    /// <summary>
+    /// Configuration for the embedded read-only monitoring dashboard.
+    /// When enabled, a Kestrel HTTP server serves a dashboard on the configured port.
+    /// </summary>
+    record MonitoringConfig(
+        [property: JsonPropertyName("enabled")]     bool   Enabled,
+        [property: JsonPropertyName("port")]        int    Port = 5000,
+        [property: JsonPropertyName("logBufferSize")] int LogBufferSize = 5000
     );
 }
