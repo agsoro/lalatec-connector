@@ -90,5 +90,19 @@ namespace Connector
             if (BitConverter.IsLittleEndian) Array.Reverse(b);
             return BitConverter.ToUInt64(b, 0);
         }
+
+        /// <summary>Writes a float32 value to two contiguous holding registers (big-endian).</summary>
+        public static void WriteFloat32(IModbusMaster master, byte slaveId, ushort address, float value)
+        {
+            var b = BitConverter.GetBytes(value);
+            if (BitConverter.IsLittleEndian) Array.Reverse(b);
+            // big-endian register order: b[0..1] first register, b[2..3] second register
+            var regs = new ushort[]
+            {
+                (ushort)((b[0] << 8) | b[1]),
+                (ushort)((b[2] << 8) | b[3]),
+            };
+            master.WriteMultipleRegisters(slaveId, address, regs);
+        }
     }
 }

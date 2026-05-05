@@ -14,7 +14,7 @@ namespace Connector
 {
     using Telemetry = Dictionary<string, object>;
 
-    class GlueckReader : IDeviceReader
+    class GlueckReader : IDeviceReader, IDeviceWriter
     {
         const ushort REG_ACTIVE_ALLOWED_POWER_PCT = 0x1230; // 4656 decimal
 
@@ -36,6 +36,25 @@ namespace Connector
                 {
                     [TelemetryKeys.PowerLimitPct] = Math.Round(pct, 2),
                 };
+            });
+        }
+
+        // =====================================================================
+        //  IDeviceWriter.Write
+        // =====================================================================
+        public void Write(ConnectionConfig connection, DeviceConfig device,
+                          string key, double value)
+        {
+            // Only handle the known key; ignore unknown keys gracefully
+            if (key != TelemetryKeys.PowerLimitPct) return;
+
+            byte slaveId = device.SlaveId
+                ?? throw new InvalidOperationException($"Device '{device.Name}' is missing slaveId.");
+
+            ModbusHelper.WithMaster<int>(connection, master =>
+            {
+                ModbusHelper.WriteFloat32(master, slaveId, REG_ACTIVE_ALLOWED_POWER_PCT, (float)value);
+                return 0;
             });
         }
     }
