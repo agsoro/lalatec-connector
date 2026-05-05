@@ -6,21 +6,15 @@
 //    ───────  ───────────────  ─────  ──────────────────
 //    0x1230   power_limit_pct  %      0.0 – 100.0
 //    (= 4656 decimal)
-//
-//  To expose additional registers add them to connector.json:
-//    "writableRegisters": [
-//      { "key": "power_limit_pct", "address": "0x1230", "type": "float32-be" }
-//    ]
 
 using System;
 using System.Collections.Generic;
-using System.Linq;
 
 namespace Connector
 {
     using Telemetry = Dictionary<string, object>;
 
-    class GlueckReader : IDeviceReader, IDeviceWriter
+    class GlueckReader : IDeviceReader
     {
         const ushort REG_ACTIVE_ALLOWED_POWER_PCT = 0x1230; // 4656 decimal
 
@@ -42,35 +36,6 @@ namespace Connector
                 {
                     [TelemetryKeys.PowerLimitPct] = Math.Round(pct, 2),
                 };
-            });
-        }
-
-        // =====================================================================
-        //  IDeviceWriter.Write
-        // =====================================================================
-        public void Write(ConnectionConfig conn, DeviceConfig device, string key, double value)
-        {
-            if (device.WritableRegisters is not { Count: > 0 })
-                throw new InvalidOperationException(
-                    $"Device '{device.Name}' has no 'writableRegisters' configured in connector.json.");
-
-            var reg = device.WritableRegisters
-                .FirstOrDefault(r => string.Equals(r.Key, key, StringComparison.OrdinalIgnoreCase))
-                ?? throw new NotSupportedException(
-                    $"Key '{key}' is not listed in 'writableRegisters' for device '{device.Name}'.");
-
-            byte slaveId = device.SlaveId
-                ?? throw new InvalidOperationException($"Device '{device.Name}' is missing slaveId.");
-
-            // Parse address – accepts decimal ("4656") and hex ("0x1230")
-            ushort address = reg.Address.StartsWith("0x", StringComparison.OrdinalIgnoreCase)
-                ? Convert.ToUInt16(reg.Address, 16)
-                : ushort.Parse(reg.Address);
-
-            ModbusHelper.WithMaster(conn, master =>
-            {
-                ModbusHelper.WriteRegister(master, slaveId, address, reg.Type, value);
-                return 0;   // Func<T> requires a return value
             });
         }
     }

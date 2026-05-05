@@ -93,33 +93,15 @@
       "pollIntervalSeconds": 30
     },
 
-    // ── Glück controller ──────────────────────────────────────────────────────
+    // ── Glück controller (Modbus TCP, read-only) ─────────────────────────────
     {
       "name":                "Glueck Controller Zone 1",
       "deviceType":          "glueck",
       "connectionId":        "modbus-building-a",
       "slaveId":             3,
-      "pollIntervalSeconds": 30,
-
-      // ── Writable registers ─────────────────────────────────────────────────
-      // Each entry maps a ThingsBoard key to a Modbus holding register (or coil).
-      //
-      //   key     – ThingsBoard attribute/telemetry key
-      //   address – 0-based register address: decimal ("4656") or hex ("0x1230")
-      //   type    – "float32-be" | "int32-be" | "uint32-be" | "int16" | "uint16" | "coil"
-      //             Defaults to "float32-be" if omitted.
-      //
-      // Keep this list in sync with the hardware register map.
-      "writableRegisters": [
-        { "key": "power_limit_pct", "address": "0x1230", "type": "float32-be" }
-      ],
-
-      // ── Write-back (opt-in) ────────────────────────────────────────────────
-      // Remove or set both to false to disable write-back entirely.
-      "writeback": {
-        "sharedAttributes": true,   // write when a ThingsBoard shared attribute changes
-        "rpc":              true    // write when a ThingsBoard server-side RPC fires
-      }
+      "pollIntervalSeconds": 30
+      // Note: Write-back (writableRegisters) has been removed from Modbus devices.
+      // Register addresses are now hardcoded in the driver code.
     },
 
     // ── BACnet/IP device with COV subscriptions ───────────────────────────────
@@ -236,7 +218,7 @@
         }
       },
 
-      // ── Write-back (opt-in) ────────────────────────────────────────────────
+      // ── Write-back (BACnet only – opt-in) ──────────────────────────────────
       // The connector subscribes to the appropriate MQTT topics on this device's
       // connection and forwards write commands to the BACnet device.
       //

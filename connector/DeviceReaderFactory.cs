@@ -28,7 +28,8 @@ namespace Connector
         }
 
         /// <summary>
-        /// Returns the <see cref="IDeviceWriter"/> for the given device type,
+        /// Returns the <see cref="IDeviceWriter"/> for the given device type
+        /// (BACnet devices only – runtime-discovery based),
         /// or <c>null</c> if the driver does not support write-back.
         /// </summary>
         public static IDeviceWriter? GetWriter(string deviceType)

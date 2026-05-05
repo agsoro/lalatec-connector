@@ -13,6 +13,8 @@ namespace Connector
     );
 
     // ── Write-back ─────────────────────────────────────────────────────────────
+    // Only applicable to BACnet devices (runtime-discovery based).
+    // Modbus devices no longer support write-back via config-driven writable registers.
 
     /// <summary>
     /// Enables MQTT-driven write-back for a device. Both fields are opt-in (default false).
@@ -23,32 +25,6 @@ namespace Connector
 
         /// <summary>Subscribe to server-side RPC calls (method "setValue") and write the value to the device.</summary>
         [property: JsonPropertyName("rpc")]              bool Rpc
-    );
-
-    /// <summary>
-    /// Maps a single ThingsBoard key to a Modbus holding register (or coil) for write-back.
-    /// </summary>
-    record ModbusWritableRegister(
-        /// <summary>ThingsBoard attribute/telemetry key, e.g. "active_allowed_power_pct".</summary>
-        [property: JsonPropertyName("key")]     string Key,
-
-        /// <summary>
-        /// 0-based register address. Accepts decimal ("4656") or hex ("0x1230") notation.
-        /// For coil type, this is the 0-based coil address.
-        /// </summary>
-        [property: JsonPropertyName("address")] string Address,
-
-        /// <summary>
-        /// Data type for the write:
-        ///   "float32-be"  → 2 × 16-bit holding registers, IEEE 754, big-endian word order
-        ///   "int32-be"    → 2 × 16-bit holding registers, signed 32-bit, big-endian word order
-        ///   "uint32-be"   → 2 × 16-bit holding registers, unsigned 32-bit, big-endian word order
-        ///   "int16"       → 1 × 16-bit holding register, signed
-        ///   "uint16"      → 1 × 16-bit holding register, unsigned
-        ///   "coil"        → single coil (WriteSingleCoil); value != 0 → true
-        /// Defaults to "float32-be".
-        /// </summary>
-        [property: JsonPropertyName("type")]    string Type = "float32-be"
     );
 
     // ── ThingsBoard ────────────────────────────────────────────────────────────
@@ -93,9 +69,8 @@ namespace Connector
         [property: JsonPropertyName("bacnetDeviceId")] uint?             BacnetDeviceId,
         [property: JsonPropertyName("bacnet")]         BacnetDeviceConfig? Bacnet,
 
-        // Write-back (optional – both drivers)
-        [property: JsonPropertyName("writeback")]          WritebackConfig?              Writeback,
-        [property: JsonPropertyName("writableRegisters")]  List<ModbusWritableRegister>? WritableRegisters,
+        // Write-back (BACnet only – runtime-discovery based)
+        [property: JsonPropertyName("writeback")] WritebackConfig? Writeback,
 
         /// <summary>
         /// Per-device poll interval in seconds. Overrides the global polling.intervalSeconds.
