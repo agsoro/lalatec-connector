@@ -19,6 +19,8 @@
 #                          Device 1001 with analog, binary, multi-state objects.
 #                          Full COV subscribe / notify support.
 #
+#   5. thingsboard-tests – Integration tests for ThingsBoard API (alarms, assets, entity views).
+#
 # Quick start:
 #   docker compose up --build
 #
@@ -90,6 +92,25 @@ services:
       - ./connector/docker/connector.compose.json:/app/connector.json:ro
     # All services share the default compose bridge network.
     # "thingsboard", "modbus-sim", and "bacnet-sim" resolve via Docker DNS.
+
+  # ── ThingsBoard API Integration Tests ────────────────────────────────────────
+  thingsboard-tests:
+    build:
+      context: testing/thingsboard-tests
+    container_name: thingsboard-tests
+    restart: "no"
+    depends_on:
+      thingsboard:
+        condition: service_healthy
+      lalatec-connector:
+        condition: service_started
+    environment:
+      TB_HOST: thingsboard
+      TB_HTTP_PORT: 9090
+      TB_ADMIN_EMAIL: sysadmin@thingsboard.org
+      TB_ADMIN_PASSWORD: sysadmin
+    # All services share the default compose bridge network.
+    # "thingsboard" resolves via Docker DNS.
 
 volumes:
   tb-data:
